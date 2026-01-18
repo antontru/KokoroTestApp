@@ -22,7 +22,7 @@ brew install git-lfs
 git lfs install
 ```
 
-Otherwise cloning and running the application is done as any other app:
+After that, cloning and running the application is done as any other app:
 
 1. **Clone the repository** (Git LFS will automatically download the model file):
    ```bash
@@ -35,13 +35,17 @@ Otherwise cloning and running the application is done as any other app:
    ls -la Resources/kokoro-v1_0.safetensors
    # Should show a file of approximately 600MB
    ```
+   If it failed, download the file manually:
+   1. View [Resources/kokoro-v1_0.safetensors](https://github.com/mlalma/KokoroTestApp/blob/main/Resources/kokoro-v1_0.safetensors)
+   2. On the right side of the screen, find the group of buttons: Raw, ⬇️, ✏️
+   3. Click the download icon ⬇️, and save it in [your repository]/Resources directory
 
-3. **Open in Xcode**:
+4. **Open in Xcode**:
    ```bash
    open KokoroTestApp.xcodeproj
    ```
 
-4. **Build and run** the project in Xcode
+5. **Build and run** the project in Xcode
 
 ## Features
 
