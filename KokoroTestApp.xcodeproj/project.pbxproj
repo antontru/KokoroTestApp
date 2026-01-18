@@ -13,7 +13,24 @@
 		52FE05A32EAA8A200018FCF1 /* MLXUtilsLibrary in Frameworks */ = {isa = PBXBuildFile; productRef = 52FE05A22EAA8A200018FCF1 /* MLXUtilsLibrary */; };
 		52FE05CE2EAA938B0018FCF1 /* MisakiSwift in Frameworks */ = {isa = PBXBuildFile; productRef = 52FE05CD2EAA938B0018FCF1 /* MisakiSwift */; };
 		52FE05F12EABBB5A0018FCF1 /* KokoroSwift in Frameworks */ = {isa = PBXBuildFile; productRef = 52FE05F02EABBB5A0018FCF1 /* KokoroSwift */; };
+		AAAA00012EAA89F50018FCF1 /* KokoroSwift in Embed Frameworks */ = {isa = PBXBuildFile; productRef = 52FE059F2EAA89F50018FCF1 /* KokoroSwift */; settings = {ATTRIBUTES = (CodeSignOnCopy, ); }; };
+		AAAA00022EAA938B0018FCF1 /* MisakiSwift in Embed Frameworks */ = {isa = PBXBuildFile; productRef = 52FE05CD2EAA938B0018FCF1 /* MisakiSwift */; settings = {ATTRIBUTES = (CodeSignOnCopy, ); }; };
 /* End PBXBuildFile section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		AAAA00032EAA89F50018FCF1 /* Embed Frameworks */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 10;
+			files = (
+				AAAA00012EAA89F50018FCF1 /* KokoroSwift in Embed Frameworks */,
+				AAAA00022EAA938B0018FCF1 /* MisakiSwift in Embed Frameworks */,
+			);
+			name = "Embed Frameworks";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
 		5247E6922E8A5478003F2FA4 /* KokoroTestApp.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = KokoroTestApp.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -80,6 +97,7 @@
 				5247E68E2E8A5478003F2FA4 /* Sources */,
 				5247E68F2E8A5478003F2FA4 /* Frameworks */,
 				5247E6902E8A5478003F2FA4 /* Resources */,
+				AAAA00032EAA89F50018FCF1 /* Embed Frameworks */,
 			);
 			buildRules = (
 			);
@@ -125,6 +143,8 @@
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
 				52FE05EF2EABBB5A0018FCF1 /* XCRemoteSwiftPackageReference "kokoro-ios" */,
+				52FE05F12EABBB5B0018FCF2 /* XCRemoteSwiftPackageReference "mlx-swift" */,
+				52FE05F22EABBB5C0018FCF3 /* XCRemoteSwiftPackageReference "MisakiSwift" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 5247E6932E8A5478003F2FA4 /* Products */;
@@ -389,7 +409,23 @@
 			repositoryURL = "https://github.com/mlalma/kokoro-ios";
 			requirement = {
 				kind = exactVersion;
-				version = 1.0.11;
+				version = 1.0.10;
+			};
+		};
+		52FE05F12EABBB5B0018FCF2 /* XCRemoteSwiftPackageReference "mlx-swift" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/ml-explore/mlx-swift";
+			requirement = {
+				kind = exactVersion;
+				version = 0.29.1;
+			};
+		};
+		52FE05F22EABBB5C0018FCF3 /* XCRemoteSwiftPackageReference "MisakiSwift" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/mlalma/MisakiSwift";
+			requirement = {
+				kind = exactVersion;
+				version = 1.0.5;
 			};
 		};
 /* End XCRemoteSwiftPackageReference section */
