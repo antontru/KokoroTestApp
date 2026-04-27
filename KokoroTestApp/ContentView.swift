@@ -2,11 +2,13 @@ import PDFKit
 import SwiftUI
 import UniformTypeIdentifiers
 
+#if os(iOS)
 struct ContentView: View {
     @ObservedObject var viewModel: TestAppModel
 
     @State private var inputText: String = ""
     @State private var isReadView: Bool = false
+    @FocusState private var isEditorFocused: Bool
 
     @State private var isShowingImporter: Bool = false
     @State private var isShowingSettings: Bool = false
@@ -40,6 +42,7 @@ struct ContentView: View {
                     } else {
                         EditView(
                             inputText: $inputText,
+                            isEditorFocused: $isEditorFocused,
                             onClear: clearInputText,
                             wordCount: wordCount
                         )
@@ -85,8 +88,9 @@ struct ContentView: View {
                 PlayerBar(
                     viewModel: viewModel,
                     canPlay: !inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                    onPlayPause: handlePlayPauseTapped
+                    onPrimaryAction: handlePrimaryActionTapped
                 )
+                .frame(maxWidth: .infinity)
             }
             .fileImporter(
                 isPresented: $isShowingImporter,
@@ -127,17 +131,27 @@ struct ContentView: View {
     }
 
     private func clearInputText() {
+        isEditorFocused = false
         inputText = ""
         isReadView = false
         viewModel.clearText()
     }
 
-    private func handlePlayPauseTapped() {
+    private func handlePrimaryActionTapped() {
         let trimmed = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
 
+        isEditorFocused = false
         isReadView = true
-        viewModel.togglePlay(using: inputText)
+        if viewModel.playbackPhase == .generating {
+            return
+        }
+
+        if viewModel.isPlaybackPrepared {
+            viewModel.togglePlay(using: inputText)
+        } else {
+            viewModel.preparePlayback(using: inputText, autoPlay: false)
+        }
     }
 
     private func handleImportResult(_ result: Result<[URL], Error>) {
@@ -220,6 +234,7 @@ struct ContentView: View {
 
 private struct EditView: View {
     @Binding var inputText: String
+    @FocusState.Binding var isEditorFocused: Bool
     let onClear: () -> Void
     let wordCount: Int
 
@@ -227,6 +242,7 @@ private struct EditView: View {
         VStack(spacing: 0) {
             ZStack(alignment: .topLeading) {
                 TextEditor(text: $inputText)
+                    .focused($isEditorFocused)
                     .padding(12)
                     .scrollContentBackground(.hidden)
                     .background(Color.black)
@@ -328,32 +344,62 @@ private struct ReadView: View {
 private struct PlayerBar: View {
     @ObservedObject var viewModel: TestAppModel
     let canPlay: Bool
-    let onPlayPause: () -> Void
+    let onPrimaryAction: () -> Void
 
     var body: some View {
         VStack(spacing: 10) {
-            if !viewModel.sentences.isEmpty {
-                Text("\(currentDisplayIndex) / \(viewModel.sentences.count)")
-                    .font(.subheadline)
-                    .foregroundStyle(.gray)
-            }
+            if viewModel.playbackPhase == .generating {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Generating Audio…")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.white)
 
-            HStack(spacing: 20) {
-                playerButton(systemImage: "backward.end.fill", disabled: !viewModel.hasLoadedText) {
-                    viewModel.skipPrevious()
+                    ProgressView(value: viewModel.generationProgress, total: 1)
+                        .tint(.green)
+
+                    Text("\(Int((viewModel.generationProgress * 100).rounded()))%")
+                        .font(.caption)
+                        .foregroundStyle(.gray)
+                }
+            } else if viewModel.isPlaybackPrepared {
+                if !viewModel.sentences.isEmpty {
+                    Text("\(currentDisplayIndex) / \(viewModel.sentences.count)")
+                        .font(.subheadline)
+                        .foregroundStyle(.gray)
                 }
 
-                playPauseButton
+                HStack(spacing: 20) {
+                    playerButton(systemImage: "backward.end.fill", disabled: !viewModel.hasLoadedText) {
+                        viewModel.skipPrevious()
+                    }
 
-                playerButton(systemImage: "stop.fill", disabled: !viewModel.hasLoadedText) {
-                    viewModel.stopPlayback()
-                }
+                    playPauseButton
 
-                playerButton(systemImage: "forward.end.fill", disabled: !viewModel.hasLoadedText) {
-                    viewModel.skipNext()
+                    playerButton(systemImage: "stop.fill", disabled: !viewModel.hasLoadedText) {
+                        viewModel.stopPlayback()
+                    }
+
+                    playerButton(systemImage: "forward.end.fill", disabled: !viewModel.hasLoadedText) {
+                        viewModel.skipNext()
+                    }
                 }
+            } else {
+                Button(action: onPrimaryAction) {
+                    HStack(spacing: 10) {
+                        Image(systemName: "waveform")
+                        Text("Generate Audio")
+                            .fontWeight(.semibold)
+                    }
+                    .foregroundStyle(.white)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 14)
+                    .background(Color.green.opacity(canPlay ? 0.95 : 0.45))
+                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                }
+                .disabled(!canPlay)
             }
         }
+        .frame(maxWidth: .infinity)
         .padding(.top, 12)
         .padding(.bottom, 18)
         .padding(.horizontal, 16)
@@ -376,7 +422,7 @@ private struct PlayerBar: View {
 
     @ViewBuilder
     private var playPauseButton: some View {
-        Button(action: onPlayPause) {
+        Button(action: onPrimaryAction) {
             ZStack {
                 Circle()
                     .fill(Color.green.opacity(playButtonDisabled ? 0.4 : 0.95))
@@ -592,3 +638,13 @@ private struct DebugLogOverlay: View {
 #Preview {
     ContentView(viewModel: TestAppModel())
 }
+#else
+struct ContentView: View {
+    let viewModel: TestAppModel
+
+    var body: some View {
+        Text("iPhone only")
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+#endif
