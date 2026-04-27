@@ -1,70 +1,594 @@
+import PDFKit
 import SwiftUI
+import UniformTypeIdentifiers
 
-/// This view provides a simple interface for text-to-speech generation.
 struct ContentView: View {
-  /// The view model that manages the TTS engine and audio playback
-  @ObservedObject var viewModel: TestAppModel
-  
-  /// The text input from the user that will be converted to speech
-  @State private var inputText: String = ""
+    @ObservedObject var viewModel: TestAppModel
 
-  var body: some View {
-    VStack {
-      Spacer()
-      
-      // Text input field for entering speech content
-      TextField("Type something to say...", text: $inputText)
-        .padding()
-        .background(Color(.systemGray))
-        .cornerRadius(8)
-        .padding(.horizontal)
+    @State private var inputText: String = ""
+    @State private var isReadView: Bool = false
 
-      // Voice selection picker
-      Picker("Selected Voice: ", selection: $viewModel.selectedVoice) {
-        ForEach(viewModel.voiceNames, id: \.self) { voice in
-          Text(voice)
-            .foregroundStyle(Color.black)
-            .tag(voice)
-        }
-      }
-      .accentColor(.black)
-      .foregroundColor(.black)
-      .pickerStyle(.menu)
-      .padding(.horizontal)
-      .tint(.accentColor)
-      .background(.gray)
-      
-      // Button to trigger text-to-speech synthesis
-      Button {
-        if !inputText.isEmpty {
-          viewModel.say(inputText)
-        } else {
-          viewModel.say("Please type something first")
-        }
-      } label: {
-        HStack(alignment: .center) {
-          Spacer()
-          Text("Say something")
-            .foregroundColor(.white)
-            .frame(height: 50)
-          Spacer()
-        }
-        .background(.black)
-        .padding(.horizontal)
-      }
+    @State private var isShowingImporter: Bool = false
+    @State private var isShowingSettings: Bool = false
+    @State private var isShowingDebugOverlay: Bool = false
 
-      Text("Spoken string: " + viewModel.stringToFollowTheAudio)
-        .padding()
-        .foregroundStyle(.black)
-        .background(.white)
-      
-      Spacer()
+    @State private var importErrorMessage: String?
+    @State private var titleTapTimestamps: [Date] = []
+
+    var body: some View {
+        #if targetEnvironment(simulator)
+        Text("Not supported on Simulator")
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Color.black)
+            .foregroundStyle(.white)
+        #else
+        NavigationStack {
+            VStack(spacing: 0) {
+                if let importErrorMessage {
+                    Text(importErrorMessage)
+                        .font(.footnote)
+                        .foregroundStyle(.red)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 16)
+                        .padding(.bottom, 8)
+                        .transition(.opacity)
+                }
+
+                Group {
+                    if isReadView {
+                        ReadView(viewModel: viewModel)
+                    } else {
+                        EditView(
+                            inputText: $inputText,
+                            onClear: clearInputText,
+                            wordCount: wordCount
+                        )
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+            .background(Color.black)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    if isReadView {
+                        Button("Edit") {
+                            isReadView = false
+                        }
+                        .foregroundStyle(.white)
+                    } else {
+                        Button(action: registerTitleTap) {
+                            Text("Kokoro Reader")
+                                .font(.headline)
+                                .foregroundStyle(.white)
+                        }
+                    }
+                }
+
+                ToolbarItemGroup(placement: .topBarTrailing) {
+                    Button {
+                        isShowingImporter = true
+                    } label: {
+                        Image(systemName: "doc.badge.plus")
+                            .foregroundStyle(.white)
+                    }
+
+                    Button {
+                        isShowingSettings = true
+                    } label: {
+                        Image(systemName: "line.3.horizontal")
+                            .foregroundStyle(.white)
+                    }
+                }
+            }
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                PlayerBar(
+                    viewModel: viewModel,
+                    canPlay: !inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                    onPlayPause: handlePlayPauseTapped
+                )
+            }
+            .fileImporter(
+                isPresented: $isShowingImporter,
+                allowedContentTypes: [.plainText, .pdf],
+                allowsMultipleSelection: false
+            ) { result in
+                handleImportResult(result)
+            }
+            .sheet(isPresented: $isShowingSettings) {
+                SettingsSheet(viewModel: viewModel)
+                    .presentationDetents([.large])
+                    .presentationDragIndicator(.visible)
+            }
+            .fullScreenCover(isPresented: $isShowingDebugOverlay) {
+                DebugLogOverlay(
+                    logs: viewModel.debugLogs,
+                    onClear: viewModel.clearLogs,
+                    onClose: { isShowingDebugOverlay = false }
+                )
+            }
+            .onChange(of: inputText) { _, newValue in
+                if newValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    if viewModel.hasLoadedText {
+                        viewModel.clearText()
+                    }
+                    if isReadView {
+                        isReadView = false
+                    }
+                }
+            }
+            .preferredColorScheme(.dark)
+        }
+        #endif
     }
-    .background(.white)
-    .frame(maxWidth: .infinity, maxHeight: .infinity)
-  }
+
+    private var wordCount: Int {
+        inputText.split { $0.isWhitespace || $0.isNewline }.count
+    }
+
+    private func clearInputText() {
+        inputText = ""
+        isReadView = false
+        viewModel.clearText()
+    }
+
+    private func handlePlayPauseTapped() {
+        let trimmed = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+
+        isReadView = true
+        viewModel.togglePlay(using: inputText)
+    }
+
+    private func handleImportResult(_ result: Result<[URL], Error>) {
+        switch result {
+        case .success(let urls):
+            guard let url = urls.first else { return }
+
+            do {
+                let imported = try readImportedFile(from: url)
+                inputText = imported
+                isReadView = false
+                viewModel.importText(imported)
+                clearImportError()
+            } catch {
+                showImportError("Could not import file")
+            }
+        case .failure:
+            showImportError("Could not import file")
+        }
+    }
+
+    private func readImportedFile(from url: URL) throws -> String {
+        let didAccessSecurityScopedResource = url.startAccessingSecurityScopedResource()
+        defer {
+            if didAccessSecurityScopedResource {
+                url.stopAccessingSecurityScopedResource()
+            }
+        }
+
+        let typeIdentifier = try url.resourceValues(forKeys: [.contentTypeKey]).contentType
+
+        if typeIdentifier?.conforms(to: .pdf) == true {
+            return try extractPDFText(from: url)
+        }
+
+        return try String(contentsOf: url, encoding: .utf8)
+    }
+
+    private func extractPDFText(from url: URL) throws -> String {
+        guard let document = PDFDocument(url: url) else {
+            throw NSError(domain: "KokoroTestApp", code: 50, userInfo: [NSLocalizedDescriptionKey: "Invalid PDF"])
+        }
+
+        var collected: [String] = []
+        for pageIndex in 0..<document.pageCount {
+            if let pageText = document.page(at: pageIndex)?.string {
+                collected.append(pageText)
+            }
+        }
+        return collected.joined(separator: "\n\n")
+    }
+
+    private func showImportError(_ message: String) {
+        importErrorMessage = message
+        Task {
+            try? await Task.sleep(for: .seconds(3))
+            await MainActor.run {
+                if importErrorMessage == message {
+                    importErrorMessage = nil
+                }
+            }
+        }
+    }
+
+    private func clearImportError() {
+        importErrorMessage = nil
+    }
+
+    private func registerTitleTap() {
+        let now = Date()
+        titleTapTimestamps.append(now)
+        titleTapTimestamps = titleTapTimestamps.filter { now.timeIntervalSince($0) <= 2.0 }
+
+        if titleTapTimestamps.count >= 5 {
+            titleTapTimestamps.removeAll()
+            isShowingDebugOverlay = true
+        }
+    }
+}
+
+private struct EditView: View {
+    @Binding var inputText: String
+    let onClear: () -> Void
+    let wordCount: Int
+
+    var body: some View {
+        VStack(spacing: 0) {
+            ZStack(alignment: .topLeading) {
+                TextEditor(text: $inputText)
+                    .padding(12)
+                    .scrollContentBackground(.hidden)
+                    .background(Color.black)
+
+                if inputText.isEmpty {
+                    Text("Paste your text here, or import a file…")
+                        .foregroundStyle(.gray)
+                        .padding(.horizontal, 18)
+                        .padding(.vertical, 20)
+                }
+            }
+
+            if !inputText.isEmpty {
+                Divider()
+                    .overlay(Color.white.opacity(0.1))
+
+                HStack {
+                    Text("\(wordCount) words")
+                        .font(.subheadline)
+                        .foregroundStyle(.gray)
+
+                    Spacer()
+
+                    Button("Clear", role: .destructive, action: onClear)
+                        .font(.subheadline)
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 12)
+                .background(Color.white.opacity(0.04))
+            }
+        }
+        .background(Color.black)
+    }
+}
+
+private struct ReadView: View {
+    @ObservedObject var viewModel: TestAppModel
+
+    var body: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(spacing: 10) {
+                    ForEach(Array(viewModel.sentences.enumerated()), id: \.offset) { index, sentence in
+                        Button {
+                            viewModel.jumpToSentence(index)
+                        } label: {
+                            Text(sentence)
+                                .foregroundStyle(textColor(for: index))
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(14)
+                                .background(backgroundColor(for: index))
+                                .cornerRadius(12)
+                        }
+                        .buttonStyle(.plain)
+                        .id(index)
+                    }
+                }
+                .padding(.horizontal, 14)
+                .padding(.top, 10)
+                .padding(.bottom, 20)
+            }
+            .onChange(of: viewModel.currentSentenceIndex) { _, newValue in
+                guard let newValue else { return }
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    proxy.scrollTo(newValue, anchor: .center)
+                }
+            }
+        }
+    }
+
+    private func backgroundColor(for index: Int) -> Color {
+        guard let current = viewModel.currentSentenceIndex else {
+            return Color.white.opacity(0.06)
+        }
+
+        if index == current {
+            return Color.green.opacity(0.35)
+        }
+        return Color.white.opacity(0.06)
+    }
+
+    private func textColor(for index: Int) -> Color {
+        guard let current = viewModel.currentSentenceIndex else {
+            return .white
+        }
+
+        if index == current {
+            return .white
+        }
+
+        if index < current {
+            return Color.white.opacity(0.45)
+        }
+
+        return .white
+    }
+}
+
+private struct PlayerBar: View {
+    @ObservedObject var viewModel: TestAppModel
+    let canPlay: Bool
+    let onPlayPause: () -> Void
+
+    var body: some View {
+        VStack(spacing: 10) {
+            if !viewModel.sentences.isEmpty {
+                Text("\(currentDisplayIndex) / \(viewModel.sentences.count)")
+                    .font(.subheadline)
+                    .foregroundStyle(.gray)
+            }
+
+            HStack(spacing: 20) {
+                playerButton(systemImage: "backward.end.fill", disabled: !viewModel.hasLoadedText) {
+                    viewModel.skipPrevious()
+                }
+
+                playPauseButton
+
+                playerButton(systemImage: "stop.fill", disabled: !viewModel.hasLoadedText) {
+                    viewModel.stopPlayback()
+                }
+
+                playerButton(systemImage: "forward.end.fill", disabled: !viewModel.hasLoadedText) {
+                    viewModel.skipNext()
+                }
+            }
+        }
+        .padding(.top, 12)
+        .padding(.bottom, 18)
+        .padding(.horizontal, 16)
+        .background(Color(red: 0.02, green: 0.03, blue: 0.08))
+        .overlay(alignment: .top) {
+            Divider().overlay(Color.white.opacity(0.1))
+        }
+    }
+
+    private var currentDisplayIndex: Int {
+        guard let current = viewModel.currentSentenceIndex else {
+            return 0
+        }
+        return current + 1
+    }
+
+    private var playButtonDisabled: Bool {
+        !canPlay || viewModel.playbackPhase == .generating
+    }
+
+    @ViewBuilder
+    private var playPauseButton: some View {
+        Button(action: onPlayPause) {
+            ZStack {
+                Circle()
+                    .fill(Color.green.opacity(playButtonDisabled ? 0.4 : 0.95))
+                    .frame(width: 56, height: 56)
+
+                if viewModel.playbackPhase == .generating {
+                    ProgressView()
+                        .tint(.white)
+                } else if viewModel.playbackPhase == .playing {
+                    Image(systemName: "pause.fill")
+                        .foregroundStyle(.white)
+                } else {
+                    Image(systemName: "play.fill")
+                        .foregroundStyle(.white)
+                }
+            }
+        }
+        .disabled(playButtonDisabled)
+    }
+
+    private func playerButton(systemImage: String, disabled: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: systemImage)
+                .foregroundStyle(disabled ? Color.gray : Color.white)
+                .frame(width: 42, height: 42)
+                .background(Color.white.opacity(0.06))
+                .clipShape(Circle())
+        }
+        .disabled(disabled)
+    }
+}
+
+private struct SettingsSheet: View {
+    @ObservedObject var viewModel: TestAppModel
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section("Voice") {
+                    if !viewModel.usVoices.isEmpty {
+                        Text("American English")
+                            .font(.caption)
+                            .foregroundStyle(.gray)
+
+                        ForEach(viewModel.usVoices) { voice in
+                            VoiceRow(
+                                voice: voice,
+                                isSelected: viewModel.selectedVoiceID == voice.id
+                            ) {
+                                viewModel.selectVoice(voice.id)
+                            }
+                        }
+                    }
+
+                    if !viewModel.gbVoices.isEmpty {
+                        Text("British English")
+                            .font(.caption)
+                            .foregroundStyle(.gray)
+                            .padding(.top, 6)
+
+                        ForEach(viewModel.gbVoices) { voice in
+                            VoiceRow(
+                                voice: voice,
+                                isSelected: viewModel.selectedVoiceID == voice.id
+                            ) {
+                                viewModel.selectVoice(voice.id)
+                            }
+                        }
+                    }
+                }
+
+                Section {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Text("Speed")
+                                .font(.headline)
+                            Spacer()
+                            Text("\(String(format: "%.1f", viewModel.speed))x")
+                                .foregroundStyle(.gray)
+                        }
+
+                        Slider(
+                            value: Binding(
+                                get: { viewModel.speed },
+                                set: { viewModel.updateSpeed($0) }
+                            ),
+                            in: 0.5...2.0,
+                            step: 0.1
+                        )
+
+                        HStack {
+                            Text("0.5x")
+                            Spacer()
+                            Text("2.0x")
+                        }
+                        .font(.caption)
+                        .foregroundStyle(.gray)
+                    }
+                    .padding(.vertical, 4)
+                }
+            }
+            .navigationTitle("Settings")
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") {
+                        dismiss()
+                    }
+                }
+            }
+        }
+        .preferredColorScheme(.dark)
+    }
+}
+
+private struct VoiceRow: View {
+    let voice: VoiceOption
+    let isSelected: Bool
+    let onTap: () -> Void
+
+    var body: some View {
+        Button(action: onTap) {
+            HStack(spacing: 10) {
+                Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                    .foregroundStyle(isSelected ? Color.green : Color.gray)
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(voice.name)
+                        .foregroundStyle(.white)
+                    Text(voice.descriptor)
+                        .font(.caption)
+                        .foregroundStyle(.gray)
+                }
+            }
+            .padding(.vertical, 6)
+        }
+        .buttonStyle(.plain)
+        .listRowBackground(isSelected ? Color.green.opacity(0.12) : Color.clear)
+    }
+}
+
+private struct DebugLogOverlay: View {
+    let logs: [DebugLogEntry]
+    let onClear: () -> Void
+    let onClose: () -> Void
+
+    private let formatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm:ss.SSS"
+        return formatter
+    }()
+
+    var body: some View {
+        NavigationStack {
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 8) {
+                        ForEach(logs) { entry in
+                            Text("[\(formatter.string(from: entry.timestamp))] \(entry.message)")
+                                .font(.system(size: 12, weight: .regular, design: .monospaced))
+                                .foregroundStyle(color(for: entry.level))
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .id(entry.id)
+                        }
+                    }
+                    .padding(14)
+                }
+                .onChange(of: logs.count) { _, _ in
+                    guard let last = logs.last else { return }
+                    withAnimation(.easeOut(duration: 0.2)) {
+                        proxy.scrollTo(last.id, anchor: .bottom)
+                    }
+                }
+                .onAppear {
+                    guard let last = logs.last else { return }
+                    proxy.scrollTo(last.id, anchor: .bottom)
+                }
+            }
+            .navigationTitle("Debug Log")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("Clear") {
+                        onClear()
+                    }
+                }
+
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        onClose()
+                    } label: {
+                        Image(systemName: "xmark")
+                    }
+                }
+            }
+            .background(Color.black)
+        }
+        .preferredColorScheme(.dark)
+    }
+
+    private func color(for level: DebugLogEntry.Level) -> Color {
+        switch level {
+        case .info:
+            return .white
+        case .warning:
+            return .yellow
+        case .error:
+            return .red
+        }
+    }
 }
 
 #Preview {
-  ContentView(viewModel: TestAppModel())
+    ContentView(viewModel: TestAppModel())
 }

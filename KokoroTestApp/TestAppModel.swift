@@ -1,154 +1,546 @@
 import AVFoundation
-import MLX
-import SwiftUI
+import Foundation
 import KokoroSwift
-import Combine
+import MLX
 import MLXUtilsLibrary
+import NaturalLanguage
+import SwiftUI
 
-/// The view model that manages text-to-speech functionality using the Kokoro TTS engine.
-/// - Loading and managing the Kokoro TTS model
-/// - Managing available voice options
-/// - Audio playback using AVAudioEngine
-/// - Converting text to speech audio
-final class TestAppModel: ObservableObject {  
-  /// The Kokoro text-to-speech engine instance
-  let kokoroTTSEngine: KokoroTTS!
-  
-  /// The audio engine used for playback
-  let audioEngine: AVAudioEngine!
-  
-  /// The audio player node attached to the audio engine
-  let playerNode: AVAudioPlayerNode!
-  
-  /// Dictionary of available voices, mapped by voice name to MLX array data
-  let voices: [String: MLXArray]
-  
-  /// Array of voice names available for selection in the UI
-  @Published var voiceNames: [String] = []
-  
-  /// The currently selected voice name
-  @Published var selectedVoice: String = ""
-  
-  @Published var stringToFollowTheAudio: String = ""
-  
-  var timer: Timer?
-
-  /// Initializes the test app model with TTS engine, audio components, and voice data.
-  init() {
-    // Load the Kokoro TTS model from the app bundle
-    let modelPath = Bundle.main.url(forResource: "kokoro-v1_0", withExtension: "safetensors")!    
-    kokoroTTSEngine = KokoroTTS(modelPath: modelPath)
-    
-    // Initialize audio engine and player node
-    audioEngine = AVAudioEngine()
-    playerNode = AVAudioPlayerNode()
-    audioEngine.attach(playerNode)  
-    
-    // Load voice data from NPZ file
-    let voiceFilePath = Bundle.main.url(forResource: "voices", withExtension: "npz")!
-    voices = NpyzReader.read(fileFromPath: voiceFilePath) ?? [:]
-    
-    // Extract voice names and sort them alphabetically
-    voiceNames = voices.keys.map { String($0.split(separator: ".")[0]) }.sorted(by: <)
-    selectedVoice = voiceNames[0]
-
-    // Configure audio session for iOS
-    #if os(iOS)
-      do {
-        let audioSession = AVAudioSession.sharedInstance()
-        try audioSession.setCategory(.playback, mode: .default)
-        try audioSession.setActive(true)
-      } catch {
-        logPrint("Failed to set up AVAudioSession: \(error.localizedDescription)")
-      }
-    #endif
-  }
-
-  /// Converts the provided text to speech and plays it through the audio engine.
-  /// - Parameter text: The text to be converted to speech
-  func say(_ text: String) {
-    // Generate audio using the selected voice
-    // Language is determined by voice name: 'a' prefix = US English, otherwise GB English
-    let (audio, tokenArray) = try! kokoroTTSEngine.generateAudio(voice: voices[selectedVoice + ".npy"]!, language: selectedVoice.first! == "a" ? .enUS : .enGB, text: text)
-    
-    if let tokenArray {
-      for t in tokenArray {
-        print("\(t.text): \(t.start_ts, default: "UNK") - \(t.end_ts, default: "UNK")")
-      }
-    }
-    
-    // Calculate audio length and performance metrics
-    let sampleRate = Double(KokoroTTS.Constants.samplingRate)
-    let audioLength = Double(audio.count) / sampleRate
-    // Log performance metrics
-    print("Audio Length: " + String(format: "%.4f", audioLength))
-    print("Real Time Factor: " + String(format: "%.2f", audioLength / (BenchmarkTimer.getTimeInSec(KokoroTTS.Constants.bm_TTS) ?? 1.0)))
-
-    // Create audio format (mono channel at the model's sample rate)
-    let format = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 1)!
-    
-    // Create PCM buffer for the audio data
-    guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(audio.count)) else {
-      print("Couldn't create buffer")
-      return
+struct VoiceOption: Identifiable, Hashable {
+    enum LocaleGroup: String {
+        case us = "American English"
+        case gb = "British English"
     }
 
-    // Copy audio data into the buffer
-    buffer.frameLength = buffer.frameCapacity
-    let channels = buffer.floatChannelData!
-    let dst: UnsafeMutablePointer<Float> = channels[0]
-    
-    // Safely copy audio samples to the buffer
-    audio.withUnsafeBufferPointer { buf in
-        precondition(buf.baseAddress != nil)
-        let byteCount = buf.count * MemoryLayout<Float>.stride
+    let id: String
+    let name: String
+    let localeGroup: LocaleGroup
+    let descriptor: String
+}
 
-        UnsafeMutableRawPointer(dst)
-          .copyMemory(from: UnsafeRawPointer(buf.baseAddress!), byteCount: byteCount)
+struct DebugLogEntry: Identifiable {
+    enum Level {
+        case info
+        case warning
+        case error
     }
 
-    // Connect the player node to the audio engine's mixer
-    audioEngine.connect(playerNode, to: audioEngine.mainMixerNode, format: format)
-    
-    // Start the audio engine
-    do {
-      try audioEngine.start()
-    } catch {
-      print("Audio engine failed to start: \(error.localizedDescription)")
-      return
+    let id = UUID()
+    let timestamp: Date
+    let level: Level
+    let message: String
+}
+
+final class TestAppModel: ObservableObject {
+    enum PlaybackPhase {
+        case idle
+        case generating
+        case playing
+        case paused
+        case done
     }
 
-    // Schedule and play the audio buffer
-    playerNode.scheduleBuffer(buffer, at: nil, options: .interrupts, completionHandler: nil)
-    playerNode.play()
-    
-    if let tokenArray {
-      stringToFollowTheAudio = ""
-      var currentToken = 0
-      var audioTime: Double = 0.0
-      var added = false
-      
-      timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] timer in
-        guard let self else { return }
-        audioTime += 0.1
-        
-        guard currentToken < tokenArray.count else {
-          timer.invalidate()
-          return
+    @Published var voiceOptions: [VoiceOption] = []
+    @Published var selectedVoiceID: String = ""
+    @Published var speed: Double = 1.0
+
+    @Published var sentences: [String] = []
+    @Published var currentSentenceIndex: Int?
+    @Published var playbackPhase: PlaybackPhase = .idle
+
+    @Published var debugLogs: [DebugLogEntry] = []
+
+    var usVoices: [VoiceOption] {
+        voiceOptions.filter { $0.localeGroup == .us }
+    }
+
+    var gbVoices: [VoiceOption] {
+        voiceOptions.filter { $0.localeGroup == .gb }
+    }
+
+    private let kokoroTTSEngine: KokoroTTS
+    private let voices: [String: MLXArray]
+
+    private let audioEngine = AVAudioEngine()
+    private let playerNode = AVAudioPlayerNode()
+    private let timePitchNode = AVAudioUnitTimePitch()
+
+    private let synthesisQueue = DispatchQueue(label: "kokoro.tts.synthesis")
+    private var playbackToken = UUID()
+    private var prefetchToken = UUID()
+
+    private var preparedNextBuffer: AVAudioPCMBuffer?
+    private var preparedNextIndex: Int?
+    private var preparedVoiceID: String?
+
+    private var loadedText: String = ""
+    private let defaults = UserDefaults.standard
+
+    private let selectedVoiceDefaultsKey = "kokoro.selectedVoiceID"
+    private let speedDefaultsKey = "kokoro.speed"
+
+    init() {
+        let modelPath = Bundle.main.url(forResource: "kokoro-v1_0", withExtension: "safetensors")!
+        kokoroTTSEngine = KokoroTTS(modelPath: modelPath)
+
+        let voiceFilePath = Bundle.main.url(forResource: "voices", withExtension: "npz")!
+        voices = NpyzReader.read(fileFromPath: voiceFilePath) ?? [:]
+
+        configureVoices()
+        configureAudioEngine()
+        configureAudioSession()
+        configureSettings()
+        configureInterruptions()
+
+        log("Model initialized with \(voiceOptions.count) voices")
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
+    }
+
+    var hasLoadedText: Bool {
+        !sentences.isEmpty
+    }
+
+    func togglePlay(using text: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+
+        if loadedText != text || sentences.isEmpty {
+            loadText(text)
         }
-        
-        let token = tokenArray[currentToken]
-                
-        if !added, let start = token.start_ts, start < audioTime {
-          stringToFollowTheAudio += token.text + (token.whitespace.isEmpty ? "" : " ")
-          added = true
+
+        guard !sentences.isEmpty else { return }
+
+        switch playbackPhase {
+        case .playing:
+            pausePlayback()
+        case .paused:
+            resumePlayback()
+        case .idle:
+            startPlayback(at: currentSentenceIndex ?? 0)
+        case .done:
+            startPlayback(at: 0)
+        case .generating:
+            break
         }
-        
-        if let end = token.end_ts, audioTime >= end {
-          currentToken += 1
-          added = false
-        }
-      }
     }
-  }
+
+    func stopPlayback() {
+        invalidateSynthesisTokens()
+        playerNode.stop()
+        currentSentenceIndex = nil
+        playbackPhase = .idle
+        log("Playback stopped", level: .warning)
+    }
+
+    func clearText() {
+        stopPlayback()
+        sentences = []
+        loadedText = ""
+        log("Text cleared", level: .warning)
+    }
+
+    func importText(_ text: String) {
+        stopPlayback()
+        loadText(text)
+        playbackPhase = .idle
+        currentSentenceIndex = nil
+        log("Imported text with \(sentences.count) sentences")
+    }
+
+    func skipNext() {
+        guard !sentences.isEmpty else { return }
+
+        let target = (currentSentenceIndex ?? -1) + 1
+        guard target < sentences.count else {
+            finishPlayback()
+            return
+        }
+
+        startPlayback(at: target)
+    }
+
+    func skipPrevious() {
+        guard !sentences.isEmpty else { return }
+
+        let target = max((currentSentenceIndex ?? 0) - 1, 0)
+        startPlayback(at: target)
+    }
+
+    func jumpToSentence(_ index: Int) {
+        guard sentences.indices.contains(index) else { return }
+        startPlayback(at: index)
+    }
+
+    func selectVoice(_ voiceID: String) {
+        guard selectedVoiceID != voiceID else { return }
+        selectedVoiceID = voiceID
+        defaults.set(voiceID, forKey: selectedVoiceDefaultsKey)
+        preparedNextBuffer = nil
+        preparedNextIndex = nil
+        preparedVoiceID = nil
+
+        if case .playing = playbackPhase, let currentSentenceIndex {
+            prefetchSentence(after: currentSentenceIndex)
+        }
+
+        log("Voice changed to \(displayName(for: voiceID))")
+    }
+
+    func updateSpeed(_ newSpeed: Double) {
+        let clamped = min(2.0, max(0.5, newSpeed))
+        speed = clamped
+        timePitchNode.rate = Float(clamped * 100.0)
+        defaults.set(clamped, forKey: speedDefaultsKey)
+        log("Speed set to \(String(format: "%.1f", clamped))x")
+    }
+
+    func clearLogs() {
+        debugLogs.removeAll()
+    }
+
+    private func configureVoices() {
+        let options = voices.keys
+            .compactMap { key -> VoiceOption? in
+                let id = key.replacingOccurrences(of: ".npy", with: "")
+                let parts = id.split(separator: "_")
+                guard parts.count == 2 else { return nil }
+
+                let prefix = String(parts[0])
+                let rawName = String(parts[1])
+                let locale: VoiceOption.LocaleGroup
+                let descriptor: String
+
+                switch prefix {
+                case "af":
+                    locale = .us
+                    descriptor = "American English · Female"
+                case "am":
+                    locale = .us
+                    descriptor = "American English · Male"
+                case "bf":
+                    locale = .gb
+                    descriptor = "British English · Female"
+                case "bm":
+                    locale = .gb
+                    descriptor = "British English · Male"
+                default:
+                    return nil
+                }
+
+                return VoiceOption(
+                    id: id,
+                    name: rawName.capitalized,
+                    localeGroup: locale,
+                    descriptor: descriptor
+                )
+            }
+            .sorted { lhs, rhs in
+                if lhs.localeGroup == rhs.localeGroup {
+                    return lhs.name < rhs.name
+                }
+                return lhs.localeGroup == .us
+            }
+
+        voiceOptions = options
+    }
+
+    private func configureSettings() {
+        let defaultVoice = usVoices.first?.id ?? voiceOptions.first?.id ?? ""
+        let savedVoice = defaults.string(forKey: selectedVoiceDefaultsKey)
+        selectedVoiceID = voiceOptions.contains(where: { $0.id == savedVoice }) ? (savedVoice ?? defaultVoice) : defaultVoice
+
+        let savedSpeed = defaults.object(forKey: speedDefaultsKey) as? Double ?? 1.0
+        speed = min(2.0, max(0.5, savedSpeed))
+        timePitchNode.rate = Float(speed * 100.0)
+    }
+
+    private func configureAudioEngine() {
+        audioEngine.attach(playerNode)
+        audioEngine.attach(timePitchNode)
+        audioEngine.connect(playerNode, to: timePitchNode, format: nil)
+        audioEngine.connect(timePitchNode, to: audioEngine.mainMixerNode, format: nil)
+
+        do {
+            try audioEngine.start()
+        } catch {
+            log("Audio engine failed to start: \(error.localizedDescription)", level: .error)
+        }
+    }
+
+    private func configureAudioSession() {
+        #if os(iOS)
+        do {
+            let audioSession = AVAudioSession.sharedInstance()
+            try audioSession.setCategory(.playback, mode: .default)
+            try audioSession.setActive(true)
+        } catch {
+            log("Failed to configure AVAudioSession: \(error.localizedDescription)", level: .error)
+        }
+        #endif
+    }
+
+    private func configureInterruptions() {
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleAudioInterruption(_:)),
+            name: AVAudioSession.interruptionNotification,
+            object: nil
+        )
+    }
+
+    private func loadText(_ text: String) {
+        loadedText = text
+        sentences = tokenizeSentences(from: text)
+        currentSentenceIndex = nil
+        preparedNextBuffer = nil
+        preparedNextIndex = nil
+        preparedVoiceID = nil
+
+        if sentences.isEmpty {
+            playbackPhase = .idle
+            log("No sentences found after tokenization", level: .warning)
+        }
+    }
+
+    private func tokenizeSentences(from text: String) -> [String] {
+        let tokenizer = NLTokenizer(unit: .sentence)
+        tokenizer.string = text
+
+        var result: [String] = []
+        tokenizer.enumerateTokens(in: text.startIndex..<text.endIndex) { range, _ in
+            let sentence = text[range].trimmingCharacters(in: .whitespacesAndNewlines)
+            if !sentence.isEmpty {
+                result.append(sentence)
+            }
+            return true
+        }
+        return result
+    }
+
+    private func startPlayback(at index: Int) {
+        guard sentences.indices.contains(index) else { return }
+
+        invalidateSynthesisTokens()
+        playerNode.stop()
+        currentSentenceIndex = index
+
+        if let preparedNextBuffer,
+           preparedNextIndex == index,
+           preparedVoiceID == selectedVoiceID {
+            self.preparedNextBuffer = nil
+            self.preparedNextIndex = nil
+            self.preparedVoiceID = nil
+            scheduleBufferAndPlay(preparedNextBuffer, at: index)
+            return
+        }
+
+        playbackPhase = .generating
+        let token = playbackToken
+        let sentence = sentences[index]
+        let voiceID = selectedVoiceID
+
+        synthesisQueue.async { [weak self] in
+            guard let self else { return }
+            let result = self.generateBuffer(for: sentence, voiceID: voiceID)
+
+            DispatchQueue.main.async {
+                guard self.playbackToken == token else { return }
+
+                switch result {
+                case .success(let buffer):
+                    self.scheduleBufferAndPlay(buffer, at: index)
+                case .failure(let error):
+                    self.playbackPhase = .idle
+                    self.currentSentenceIndex = nil
+                    self.log("Synthesis failed: \(error.localizedDescription)", level: .error)
+                }
+            }
+        }
+    }
+
+    private func scheduleBufferAndPlay(_ buffer: AVAudioPCMBuffer, at index: Int) {
+        do {
+            if !audioEngine.isRunning {
+                try audioEngine.start()
+            }
+        } catch {
+            playbackPhase = .idle
+            currentSentenceIndex = nil
+            log("Audio engine restart failed: \(error.localizedDescription)", level: .error)
+            return
+        }
+
+        currentSentenceIndex = index
+        playbackPhase = .playing
+
+        playerNode.stop()
+        playerNode.scheduleBuffer(buffer, at: nil, options: []) { [weak self] in
+            DispatchQueue.main.async {
+                self?.handleSentenceCompletion(finishedIndex: index)
+            }
+        }
+        playerNode.play()
+
+        log("Playing sentence \(index + 1)/\(sentences.count)")
+        prefetchSentence(after: index)
+    }
+
+    private func handleSentenceCompletion(finishedIndex: Int) {
+        guard currentSentenceIndex == finishedIndex else { return }
+
+        let nextIndex = finishedIndex + 1
+        guard nextIndex < sentences.count else {
+            finishPlayback()
+            return
+        }
+
+        if let preparedNextBuffer,
+           preparedNextIndex == nextIndex,
+           preparedVoiceID == selectedVoiceID {
+            self.preparedNextBuffer = nil
+            self.preparedNextIndex = nil
+            self.preparedVoiceID = nil
+            scheduleBufferAndPlay(preparedNextBuffer, at: nextIndex)
+            return
+        }
+
+        startPlayback(at: nextIndex)
+    }
+
+    private func prefetchSentence(after index: Int) {
+        let nextIndex = index + 1
+        guard sentences.indices.contains(nextIndex) else {
+            preparedNextBuffer = nil
+            preparedNextIndex = nil
+            preparedVoiceID = nil
+            return
+        }
+
+        prefetchToken = UUID()
+        let token = prefetchToken
+        let sentence = sentences[nextIndex]
+        let voiceID = selectedVoiceID
+
+        synthesisQueue.async { [weak self] in
+            guard let self else { return }
+            let result = self.generateBuffer(for: sentence, voiceID: voiceID)
+
+            DispatchQueue.main.async {
+                guard self.prefetchToken == token else { return }
+
+                switch result {
+                case .success(let buffer):
+                    self.preparedNextBuffer = buffer
+                    self.preparedNextIndex = nextIndex
+                    self.preparedVoiceID = voiceID
+                case .failure(let error):
+                    self.preparedNextBuffer = nil
+                    self.preparedNextIndex = nil
+                    self.preparedVoiceID = nil
+                    self.log("Prefetch failed: \(error.localizedDescription)", level: .warning)
+                }
+            }
+        }
+    }
+
+    private func generateBuffer(for sentence: String, voiceID: String) -> Result<AVAudioPCMBuffer, Error> {
+        guard let voice = voices[voiceID + ".npy"] else {
+            return .failure(NSError(domain: "KokoroTestApp", code: 1, userInfo: [NSLocalizedDescriptionKey: "Voice data missing"]))
+        }
+
+        do {
+            let language: KokoroTTS.Language = voiceID.hasPrefix("a") ? .enUS : .enGB
+            let (audio, _) = try kokoroTTSEngine.generateAudio(voice: voice, language: language, text: sentence)
+
+            let sampleRate = Double(KokoroTTS.Constants.samplingRate)
+            let format = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 1)!
+
+            guard let buffer = AVAudioPCMBuffer(
+                pcmFormat: format,
+                frameCapacity: AVAudioFrameCount(audio.count)
+            ) else {
+                return .failure(NSError(domain: "KokoroTestApp", code: 2, userInfo: [NSLocalizedDescriptionKey: "Could not create audio buffer"]))
+            }
+
+            buffer.frameLength = buffer.frameCapacity
+            guard let channel = buffer.floatChannelData?[0] else {
+                return .failure(NSError(domain: "KokoroTestApp", code: 3, userInfo: [NSLocalizedDescriptionKey: "Buffer channel unavailable"]))
+            }
+
+            audio.withUnsafeBufferPointer { pointer in
+                guard let baseAddress = pointer.baseAddress else { return }
+                let byteCount = pointer.count * MemoryLayout<Float>.stride
+                UnsafeMutableRawPointer(channel).copyMemory(from: baseAddress, byteCount: byteCount)
+            }
+
+            return .success(buffer)
+        } catch {
+            return .failure(error)
+        }
+    }
+
+    private func pausePlayback() {
+        guard playbackPhase == .playing else { return }
+        playerNode.pause()
+        playbackPhase = .paused
+        log("Playback paused")
+    }
+
+    private func resumePlayback() {
+        guard playbackPhase == .paused else { return }
+        playerNode.play()
+        playbackPhase = .playing
+        log("Playback resumed")
+    }
+
+    private func finishPlayback() {
+        invalidateSynthesisTokens()
+        playerNode.stop()
+        currentSentenceIndex = nil
+        playbackPhase = .done
+        log("Playback completed")
+    }
+
+    private func invalidateSynthesisTokens() {
+        playbackToken = UUID()
+        prefetchToken = UUID()
+        preparedNextBuffer = nil
+        preparedNextIndex = nil
+        preparedVoiceID = nil
+    }
+
+    private func displayName(for voiceID: String) -> String {
+        voiceOptions.first(where: { $0.id == voiceID })?.name ?? voiceID
+    }
+
+    @objc
+    private func handleAudioInterruption(_ notification: Notification) {
+        guard
+            let userInfo = notification.userInfo,
+            let typeValue = userInfo[AVAudioSessionInterruptionTypeKey] as? UInt,
+            let type = AVAudioSession.InterruptionType(rawValue: typeValue)
+        else {
+            return
+        }
+
+        if type == .began, playbackPhase == .playing {
+            pausePlayback()
+            log("Playback paused due to audio interruption", level: .warning)
+        }
+    }
+
+    private func log(_ message: String, level: DebugLogEntry.Level = .info) {
+        let entry = DebugLogEntry(timestamp: Date(), level: level, message: message)
+
+        if Thread.isMainThread {
+            debugLogs.append(entry)
+        } else {
+            DispatchQueue.main.async {
+                self.debugLogs.append(entry)
+            }
+        }
+    }
 }
