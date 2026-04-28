@@ -1,10 +1,7 @@
 import AVFoundation
 import Combine
 import Foundation
-import KokoroSwift
 import MediaPlayer
-import MLX
-import MLXUtilsLibrary
 import NaturalLanguage
 import SwiftUI
 #if os(iOS)
@@ -48,6 +45,8 @@ final class TestAppModel: ObservableObject {
     @Published var voiceOptions: [VoiceOption] = []
     @Published var selectedVoiceID: String = ""
     @Published var speed: Double = 1.0
+    @Published var modelVariant: KokoroONNXSynthesiser.ModelVariant = .q4
+    @Published var coreMLWarningMessage: String?
 
     @Published var sentences: [String] = []
     @Published var currentSentenceIndex: Int?
@@ -64,45 +63,38 @@ final class TestAppModel: ObservableObject {
         voiceOptions.filter { $0.localeGroup == .gb }
     }
 
-    private let kokoroTTSEngine: KokoroTTS
-    private let voices: [String: MLXArray]
-
     private let audioEngine = AVAudioEngine()
     private let playerNode = AVAudioPlayerNode()
-    private let timePitchNode = AVAudioUnitTimePitch()
-    private let playbackSampleRate = Double(KokoroTTS.Constants.samplingRate)
-    private lazy var playbackFormat = AVAudioFormat(
-        standardFormatWithSampleRate: playbackSampleRate,
-        channels: 1
-    )!
+    private let synthesisQueue = DispatchQueue(label: "kokoro.onnx.synthesis")
+    private let synthesiserSetupQueue = DispatchQueue(label: "kokoro.onnx.setup", qos: .userInitiated)
+    private let synthesisAudioFormat = AVAudioFormat(standardFormatWithSampleRate: 24_000, channels: 1)!
 
-    private let synthesisQueue = DispatchQueue(label: "kokoro.tts.synthesis")
+    private var synthesiser: KokoroONNXSynthesiser?
+
     private var playbackToken = UUID()
     private var isAppActive = true
     private var pendingResumeIndex: Int?
+
     private var bufferedSentenceAudio: [Int: AVAudioPCMBuffer] = [:]
     private var bufferedVoiceID: String?
+    private var generatingIndices: Set<Int> = []
+    private let lookAheadSentenceCount = 3
 
     private var loadedText: String = ""
     private let defaults = UserDefaults.standard
 
     private let selectedVoiceDefaultsKey = "kokoro.selectedVoiceID"
     private let speedDefaultsKey = "kokoro.speed"
+    private let modelVariantDefaultsKey = "kokoro_model_variant"
 
     init() {
-        let modelPath = Bundle.main.url(forResource: "kokoro-v1_0", withExtension: "safetensors")!
-        kokoroTTSEngine = KokoroTTS(modelPath: modelPath)
-
-        let voiceFilePath = Bundle.main.url(forResource: "voices", withExtension: "npz")!
-        voices = NpyzReader.read(fileFromPath: voiceFilePath) ?? [:]
-
         configureVoices()
         configureAudioEngine()
         configureAudioSession()
         configureSettings()
+        createSynthesiser()
         configureInterruptions()
         configureRemoteCommands()
-
         log("Model initialized with \(voiceOptions.count) voices")
     }
 
@@ -117,7 +109,7 @@ final class TestAppModel: ObservableObject {
     var isPlaybackPrepared: Bool {
         guard !sentences.isEmpty else { return false }
         guard bufferedVoiceID == selectedVoiceID else { return false }
-        return bufferedSentenceAudio.count == sentences.count
+        return !bufferedSentenceAudio.isEmpty
     }
 
     func togglePlay(using text: String) {
@@ -129,10 +121,6 @@ final class TestAppModel: ObservableObject {
         }
 
         guard !sentences.isEmpty else { return }
-        guard isPlaybackPrepared else {
-            preparePlayback(using: text)
-            return
-        }
 
         switch playbackPhase {
         case .playing:
@@ -140,11 +128,15 @@ final class TestAppModel: ObservableObject {
         case .paused:
             resumePlayback()
         case .idle:
-            startPlayback(at: currentSentenceIndex ?? 0)
+            startStreamingPlayback(at: currentSentenceIndex ?? 0)
         case .done:
-            startPlayback(at: 0)
+            startStreamingPlayback(at: 0)
         case .generating:
-            break
+            if let currentSentenceIndex {
+                startStreamingPlayback(at: currentSentenceIndex)
+            } else {
+                startStreamingPlayback(at: 0)
+            }
         }
     }
 
@@ -157,14 +149,9 @@ final class TestAppModel: ObservableObject {
         }
 
         guard !sentences.isEmpty else { return }
-        if isPlaybackPrepared {
-            if autoPlay {
-                startPlayback(at: currentSentenceIndex ?? 0)
-            }
-            return
-        }
-
-        prepareAllSentences(autoPlay: autoPlay)
+        let index = currentSentenceIndex ?? 0
+        requestBufferIfNeeded(at: index, token: playbackToken, autoplayWhenReady: autoPlay)
+        prefetchLookAhead(from: index + 1, token: playbackToken)
     }
 
     func stopPlayback() {
@@ -234,9 +221,33 @@ final class TestAppModel: ObservableObject {
     func updateSpeed(_ newSpeed: Double) {
         let clamped = min(2.0, max(0.5, newSpeed))
         speed = clamped
-        timePitchNode.rate = Float(clamped)
         defaults.set(clamped, forKey: speedDefaultsKey)
-        log("Speed set to \(String(format: "%.1f", clamped))x")
+        log("Generation speed set to \(String(format: "%.1f", clamped))x")
+    }
+
+    func updateModelVariant(_ variant: KokoroONNXSynthesiser.ModelVariant) {
+        guard modelVariant != variant else { return }
+        modelVariant = variant
+        defaults.set(variant.rawValue, forKey: modelVariantDefaultsKey)
+        log("Switching model variant to \(variant.displayName)")
+
+        synthesiserSetupQueue.async { [weak self] in
+            guard let self else { return }
+            do {
+                try self.synthesiser?.reload(variant: variant)
+                DispatchQueue.main.async {
+                    self.updateCoreMLWarningFromSynthesiser()
+                    self.invalidateSynthesisTokens()
+                    self.playbackPhase = .idle
+                    self.currentSentenceIndex = nil
+                    self.log("Model variant switched to \(variant.displayName)")
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self.log("Could not switch model variant: \(error.localizedDescription)", level: .error)
+                }
+            }
+        }
     }
 
     func clearLogs() {
@@ -244,49 +255,48 @@ final class TestAppModel: ObservableObject {
     }
 
     private func configureVoices() {
-        let options = voices.keys
-            .compactMap { key -> VoiceOption? in
-                let id = key.replacingOccurrences(of: ".npy", with: "")
-                let parts = id.split(separator: "_")
-                guard parts.count == 2 else { return nil }
+        let entries: [(String, String)] = [
+            ("af_heart", "American English · Female"),
+            ("af_alloy", "American English · Female"),
+            ("af_aoede", "American English · Female"),
+            ("af_bella", "American English · Female"),
+            ("af_jessica", "American English · Female"),
+            ("af_kore", "American English · Female"),
+            ("af_nicole", "American English · Female"),
+            ("af_nova", "American English · Female"),
+            ("af_river", "American English · Female"),
+            ("af_sarah", "American English · Female"),
+            ("af_sky", "American English · Female"),
+            ("am_adam", "American English · Male"),
+            ("am_echo", "American English · Male"),
+            ("am_eric", "American English · Male"),
+            ("am_fenrir", "American English · Male"),
+            ("am_liam", "American English · Male"),
+            ("am_michael", "American English · Male"),
+            ("am_onyx", "American English · Male"),
+            ("am_puck", "American English · Male"),
+            ("am_santa", "American English · Male"),
+            ("bf_alice", "British English · Female"),
+            ("bf_emma", "British English · Female"),
+            ("bf_isabella", "British English · Female"),
+            ("bf_lily", "British English · Female"),
+            ("bm_daniel", "British English · Male"),
+            ("bm_fable", "British English · Male"),
+            ("bm_george", "British English · Male"),
+            ("bm_lewis", "British English · Male"),
+        ]
 
-                let prefix = String(parts[0])
-                let rawName = String(parts[1])
-                let locale: VoiceOption.LocaleGroup
-                let descriptor: String
-
-                switch prefix {
-                case "af":
-                    locale = .us
-                    descriptor = "American English · Female"
-                case "am":
-                    locale = .us
-                    descriptor = "American English · Male"
-                case "bf":
-                    locale = .gb
-                    descriptor = "British English · Female"
-                case "bm":
-                    locale = .gb
-                    descriptor = "British English · Male"
-                default:
-                    return nil
-                }
-
-                return VoiceOption(
-                    id: id,
-                    name: rawName.capitalized,
-                    localeGroup: locale,
-                    descriptor: descriptor
-                )
-            }
-            .sorted { lhs, rhs in
-                if lhs.localeGroup == rhs.localeGroup {
-                    return lhs.name < rhs.name
-                }
-                return lhs.localeGroup == .us
-            }
-
-        voiceOptions = options
+        voiceOptions = entries.map { id, descriptor in
+            let parts = id.split(separator: "_")
+            let prefix = String(parts.first ?? "")
+            let locale: VoiceOption.LocaleGroup = prefix.hasPrefix("b") ? .gb : .us
+            return VoiceOption(
+                id: id,
+                name: String(parts.dropFirst().joined(separator: " ")).capitalized,
+                localeGroup: locale,
+                descriptor: descriptor
+            )
+        }
     }
 
     private func configureSettings() {
@@ -296,14 +306,83 @@ final class TestAppModel: ObservableObject {
 
         let savedSpeed = defaults.object(forKey: speedDefaultsKey) as? Double ?? 1.0
         speed = min(2.0, max(0.5, savedSpeed))
-        timePitchNode.rate = Float(speed)
+
+        let savedVariant = defaults.string(forKey: modelVariantDefaultsKey)
+        modelVariant = KokoroONNXSynthesiser.ModelVariant(rawValue: savedVariant ?? "") ?? .q4
+    }
+
+    private func createSynthesiser() {
+        logBundledResourceStatus()
+        log("Initializing ONNX synthesiser…")
+        let voiceIDs = voiceOptions.map(\.id)
+        let variant = modelVariant
+
+        synthesiserSetupQueue.async { [weak self] in
+            guard let self else { return }
+            do {
+                let built = try KokoroONNXSynthesiser(voiceIDs: voiceIDs, variant: variant)
+                DispatchQueue.main.async {
+                    self.synthesiser = built
+                    self.updateCoreMLWarningFromSynthesiser()
+                    self.log("ONNX synthesiser initialized successfully")
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self.synthesiser = nil
+                    self.coreMLWarningMessage = "CoreML execution provider unavailable. Running with CPU fallback where possible."
+                    self.log("Failed to initialize ONNX synthesiser: \(error.localizedDescription)", level: .error)
+                }
+            }
+        }
+    }
+
+    private func logBundledResourceStatus() {
+        let fileNames = [
+            "onnx/model.onnx",
+            "onnx/model_q4.onnx",
+            "voices/af_heart.bin",
+            "tokenizer.json",
+            "tokenizer_config.json",
+            "config.json",
+        ]
+        for fileName in fileNames {
+            let nsPath = fileName as NSString
+            let resource = nsPath.deletingPathExtension
+            let ext = nsPath.pathExtension.isEmpty ? nil : nsPath.pathExtension
+            let subdir = (resource as NSString).deletingLastPathComponent
+            let name = (resource as NSString).lastPathComponent
+            let url: URL?
+            if subdir.isEmpty || subdir == "." {
+                url = Bundle.main.url(forResource: name, withExtension: ext)
+            } else {
+                url = Bundle.main.url(forResource: name, withExtension: ext, subdirectory: subdir)
+                    ?? Bundle.main.url(forResource: name, withExtension: ext)
+            }
+            guard let url else {
+                log("Resource missing from bundle: \(fileName)", level: .error)
+                continue
+            }
+            let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? -1
+            log("Resource \(fileName) size=\(size) bytes")
+        }
+    }
+
+    private func updateCoreMLWarningFromSynthesiser() {
+        guard let diagnostics = synthesiser?.diagnosticsInfo() else {
+            coreMLWarningMessage = "ONNX synthesiser not available"
+            return
+        }
+
+        if diagnostics.isCoreMLAvailable && diagnostics.isUsingCoreML {
+            coreMLWarningMessage = nil
+        } else {
+            coreMLWarningMessage = "CoreML EP unavailable; inference may use CPU fallback."
+        }
     }
 
     private func configureAudioEngine() {
         audioEngine.attach(playerNode)
-        audioEngine.attach(timePitchNode)
-        audioEngine.connect(playerNode, to: timePitchNode, format: playbackFormat)
-        audioEngine.connect(timePitchNode, to: audioEngine.mainMixerNode, format: playbackFormat)
+        audioEngine.connect(playerNode, to: audioEngine.mainMixerNode, format: synthesisAudioFormat)
 
         do {
             try audioEngine.start()
@@ -363,13 +442,7 @@ final class TestAppModel: ObservableObject {
                 return .success
             }
             if self.playbackPhase == .idle || self.playbackPhase == .done {
-                if self.isPlaybackPrepared {
-                    self.startPlayback(at: self.currentSentenceIndex ?? 0)
-                } else if self.isAppActive {
-                    self.prepareAllSentences(autoPlay: true)
-                } else {
-                    return .commandFailed
-                }
+                self.startStreamingPlayback(at: self.currentSentenceIndex ?? 0)
                 return .success
             }
             return .commandFailed
@@ -426,88 +499,7 @@ final class TestAppModel: ObservableObject {
     }
 
     private func startPlayback(at index: Int) {
-        guard sentences.indices.contains(index) else { return }
-        guard isPlaybackPrepared else {
-            log("Playback requested before generation completed", level: .warning)
-            return
-        }
-        pendingResumeIndex = nil
-
-        guard let cachedBuffer = bufferedSentenceAudio[index] else {
-            log("Missing generated audio for sentence \(index + 1)", level: .error)
-            playbackPhase = .idle
-            return
-        }
-
-        scheduleBufferAndPlay(cachedBuffer, at: index)
-    }
-
-    private func prepareAllSentences(autoPlay: Bool) {
-        guard !sentences.isEmpty else { return }
-        guard isAppActive else {
-            log("Cannot generate while app is inactive", level: .warning)
-            return
-        }
-
-        playbackToken = UUID()
-        let token = playbackToken
-        let voiceID = selectedVoiceID
-        let sourceSentences = sentences
-        let startIndex = currentSentenceIndex ?? 0
-
-        playbackPhase = .generating
-        generationProgress = 0
-        bufferedSentenceAudio = [:]
-        bufferedVoiceID = voiceID
-        pendingResumeIndex = nil
-
-        synthesisQueue.async { [weak self] in
-            guard let self else { return }
-            var generated: [Int: AVAudioPCMBuffer] = [:]
-            let totalCount = sourceSentences.count
-
-            for sentenceIndex in sourceSentences.indices {
-                guard self.playbackToken == token else { return }
-                guard self.isAppActive else { return }
-                guard self.selectedVoiceID == voiceID else { return }
-
-                let result = self.generateBuffer(for: sourceSentences[sentenceIndex], voiceID: voiceID)
-                switch result {
-                case .success(let buffer):
-                    generated[sentenceIndex] = buffer
-                    let progress = Double(sentenceIndex + 1) / Double(totalCount)
-                    DispatchQueue.main.async {
-                        guard self.playbackToken == token else { return }
-                        self.generationProgress = progress
-                    }
-                case .failure(let error):
-                    DispatchQueue.main.async {
-                        guard self.playbackToken == token else { return }
-                        self.playbackPhase = .idle
-                        self.currentSentenceIndex = nil
-                        self.generationProgress = 0
-                        self.log("Synthesis failed: \(error.localizedDescription)", level: .error)
-                    }
-                    return
-                }
-            }
-
-            DispatchQueue.main.async {
-                guard self.playbackToken == token else { return }
-                guard self.selectedVoiceID == voiceID else { return }
-
-                self.bufferedSentenceAudio = generated
-                self.bufferedVoiceID = voiceID
-                self.generationProgress = 1
-                self.playbackPhase = .idle
-                self.currentSentenceIndex = startIndex
-                self.log("Audio generation complete for \(generated.count) sentences")
-
-                if autoPlay {
-                    self.startPlayback(at: startIndex)
-                }
-            }
-        }
+        startStreamingPlayback(at: index)
     }
 
     private func scheduleBufferAndPlay(_ buffer: AVAudioPCMBuffer, at index: Int) {
@@ -525,20 +517,15 @@ final class TestAppModel: ObservableObject {
         currentSentenceIndex = index
         playbackPhase = .playing
 
-        guard let playableBuffer = makePlayableBuffer(from: buffer) else {
+        guard let playableBuffer = ensurePlayerCompatibleBuffer(buffer) else {
             playbackPhase = .idle
             currentSentenceIndex = nil
-            log("Audio buffer conversion failed", level: .error)
+            log("Buffer format conversion failed: input channels=\(buffer.format.channelCount), output channels=\(playerNode.outputFormat(forBus: 0).channelCount)", level: .error)
             return
         }
 
         playerNode.stop()
-        playerNode.scheduleBuffer(
-            playableBuffer,
-            at: nil,
-            options: [],
-            completionCallbackType: .dataPlayedBack
-        ) { [weak self] _ in
+        playerNode.scheduleBuffer(playableBuffer, at: nil, options: [], completionCallbackType: .dataPlayedBack) { [weak self] _ in
             DispatchQueue.main.async {
                 self?.handleSentenceCompletion(finishedIndex: index)
             }
@@ -547,6 +534,37 @@ final class TestAppModel: ObservableObject {
 
         updateNowPlayingInfo(sentenceIndex: index, sentenceText: sentences[index], rate: speed)
         log("Playing sentence \(index + 1)/\(sentences.count)")
+    }
+
+    private func ensurePlayerCompatibleBuffer(_ buffer: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {
+        let outputFormat = playerNode.outputFormat(forBus: 0)
+        if buffer.format.channelCount == outputFormat.channelCount,
+           abs(buffer.format.sampleRate - outputFormat.sampleRate) < 0.5
+        {
+            return buffer
+        }
+
+        guard let converted = AVAudioPCMBuffer(pcmFormat: outputFormat, frameCapacity: buffer.frameCapacity) else {
+            return nil
+        }
+        converted.frameLength = buffer.frameLength
+
+        guard let srcChannels = buffer.floatChannelData,
+              let dstChannels = converted.floatChannelData
+        else {
+            return nil
+        }
+
+        let srcChannelCount = Int(buffer.format.channelCount)
+        let dstChannelCount = Int(outputFormat.channelCount)
+        let frames = Int(buffer.frameLength)
+
+        for dst in 0..<dstChannelCount {
+            let src = min(dst, srcChannelCount - 1)
+            dstChannels[dst].assign(from: srcChannels[src], count: frames)
+        }
+
+        return converted
     }
 
     private func handleSentenceCompletion(finishedIndex: Int) {
@@ -558,103 +576,26 @@ final class TestAppModel: ObservableObject {
             return
         }
 
-        guard let cachedBuffer = bufferedSentenceAudio[nextIndex] else {
-            playbackPhase = .idle
-            currentSentenceIndex = nil
-            log("Missing generated audio for sentence \(nextIndex + 1)", level: .error)
-            return
+        currentSentenceIndex = nextIndex
+        if let cachedBuffer = bufferedSentenceAudio[nextIndex] {
+            scheduleBufferAndPlay(cachedBuffer, at: nextIndex)
+        } else {
+            playbackPhase = .generating
+            requestBufferIfNeeded(at: nextIndex, token: playbackToken, autoplayWhenReady: true)
         }
-
-        scheduleBufferAndPlay(cachedBuffer, at: nextIndex)
+        prefetchLookAhead(from: nextIndex + 1, token: playbackToken)
     }
 
     private func generateBuffer(for sentence: String, voiceID: String) -> Result<AVAudioPCMBuffer, Error> {
-        guard let voice = voices[voiceID + ".npy"] else {
-            return .failure(NSError(domain: "KokoroTestApp", code: 1, userInfo: [NSLocalizedDescriptionKey: "Voice data missing"]))
+        guard let synthesiser else {
+            return .failure(NSError(domain: "KokoroONNX", code: 101, userInfo: [NSLocalizedDescriptionKey: "Synthesiser unavailable"]))
         }
 
         do {
-            let device: Device = .gpu
-            let (audio, _) = try Device.withDefaultDevice(device) {
-                try kokoroTTSEngine.generateAudio(
-                    voice: voice,
-                    language: voiceID.hasPrefix("a") ? .enUS : .enGB,
-                    text: sentence
-                )
-            }
-
-            guard let buffer = AVAudioPCMBuffer(
-                pcmFormat: playbackFormat,
-                frameCapacity: AVAudioFrameCount(audio.count)
-            ) else {
-                return .failure(NSError(domain: "KokoroTestApp", code: 2, userInfo: [NSLocalizedDescriptionKey: "Could not create audio buffer"]))
-            }
-
-            buffer.frameLength = buffer.frameCapacity
-            guard let channel = buffer.floatChannelData?[0] else {
-                return .failure(NSError(domain: "KokoroTestApp", code: 3, userInfo: [NSLocalizedDescriptionKey: "Buffer channel unavailable"]))
-            }
-
-            audio.withUnsafeBufferPointer { pointer in
-                guard let baseAddress = pointer.baseAddress else { return }
-                let byteCount = pointer.count * MemoryLayout<Float>.stride
-                UnsafeMutableRawPointer(channel).copyMemory(from: baseAddress, byteCount: byteCount)
-            }
-
+            let buffer = try synthesiser.synthesiseBlocking(text: sentence, voiceID: voiceID, speed: Float(speed))
             return .success(buffer)
         } catch {
             return .failure(error)
-        }
-    }
-
-    private func makePlayableBuffer(from buffer: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {
-        let targetFormat = playerNode.outputFormat(forBus: 0)
-        let sourceFormat = buffer.format
-
-        let formatsAlreadyMatch =
-            sourceFormat.sampleRate == targetFormat.sampleRate &&
-            sourceFormat.channelCount == targetFormat.channelCount &&
-            sourceFormat.commonFormat == targetFormat.commonFormat &&
-            sourceFormat.isInterleaved == targetFormat.isInterleaved
-
-        if formatsAlreadyMatch {
-            return buffer
-        }
-
-        guard
-            let converter = AVAudioConverter(from: sourceFormat, to: targetFormat),
-            let convertedBuffer = AVAudioPCMBuffer(
-                pcmFormat: targetFormat,
-                frameCapacity: AVAudioFrameCount(
-                    Double(buffer.frameLength) * targetFormat.sampleRate / sourceFormat.sampleRate
-                ) + 1
-            )
-        else {
-            return nil
-        }
-
-        var didProvideSourceBuffer = false
-        var conversionError: NSError?
-        let status = converter.convert(to: convertedBuffer, error: &conversionError) { _, outStatus in
-            if didProvideSourceBuffer {
-                outStatus.pointee = .endOfStream
-                return nil
-            } else {
-                didProvideSourceBuffer = true
-                outStatus.pointee = .haveData
-                return buffer
-            }
-        }
-
-        guard conversionError == nil else {
-            return nil
-        }
-
-        switch status {
-        case .haveData, .inputRanDry, .endOfStream:
-            return convertedBuffer
-        default:
-            return nil
         }
     }
 
@@ -673,11 +614,9 @@ final class TestAppModel: ObservableObject {
     }
 
     private func finishPlayback() {
-        invalidateSynthesisTokens()
         playerNode.stop()
         currentSentenceIndex = nil
         playbackPhase = .done
-        generationProgress = 0
         clearNowPlayingInfo()
         log("Playback completed")
     }
@@ -686,6 +625,7 @@ final class TestAppModel: ObservableObject {
         playbackToken = UUID()
         bufferedSentenceAudio = [:]
         bufferedVoiceID = nil
+        generatingIndices.removeAll()
         pendingResumeIndex = nil
         generationProgress = 0
     }
@@ -752,12 +692,7 @@ final class TestAppModel: ObservableObject {
     @objc
     private func handleWillResignActive() {
         isAppActive = false
-        if playbackPhase == .generating {
-            pendingResumeIndex = currentSentenceIndex ?? 0
-            playbackToken = UUID()
-            playbackPhase = .paused
-        }
-        log("App moved to inactive/background state; synthesis paused")
+        log("App moved to inactive/background state")
     }
 
     @objc
@@ -774,19 +709,85 @@ final class TestAppModel: ObservableObject {
         }
         if let pendingResumeIndex, playbackPhase == .paused {
             self.pendingResumeIndex = nil
-            if isPlaybackPrepared {
-                startPlayback(at: pendingResumeIndex)
-            } else {
-                currentSentenceIndex = pendingResumeIndex
-                prepareAllSentences(autoPlay: true)
-            }
+            startStreamingPlayback(at: pendingResumeIndex)
         }
-        log("App is active; synthesis resumed")
+        log("App is active")
     }
     #endif
 
+    private func startStreamingPlayback(at index: Int) {
+        guard sentences.indices.contains(index) else { return }
+        guard synthesiser != nil else {
+            log("Synthesiser unavailable", level: .error)
+            return
+        }
+
+        playbackToken = UUID()
+        let token = playbackToken
+        pendingResumeIndex = nil
+        currentSentenceIndex = index
+        bufferedVoiceID = selectedVoiceID
+        playerNode.stop()
+
+        if let cachedBuffer = bufferedSentenceAudio[index] {
+            scheduleBufferAndPlay(cachedBuffer, at: index)
+        } else {
+            playbackPhase = .generating
+            requestBufferIfNeeded(at: index, token: token, autoplayWhenReady: true)
+        }
+
+        prefetchLookAhead(from: index + 1, token: token)
+    }
+
+    private func prefetchLookAhead(from startIndex: Int, token: UUID) {
+        guard startIndex < sentences.count else { return }
+        let endIndex = min(sentences.count, startIndex + lookAheadSentenceCount)
+        for index in startIndex..<endIndex {
+            requestBufferIfNeeded(at: index, token: token, autoplayWhenReady: false)
+        }
+    }
+
+    private func requestBufferIfNeeded(at index: Int, token: UUID, autoplayWhenReady: Bool) {
+        guard sentences.indices.contains(index) else { return }
+        guard bufferedSentenceAudio[index] == nil else { return }
+        guard !generatingIndices.contains(index) else { return }
+        let sentence = sentences[index]
+        let voiceID = selectedVoiceID
+        generatingIndices.insert(index)
+        log("Synthesis start sentence \(index + 1): \(sentence.prefix(48))...")
+
+        synthesisQueue.async { [weak self] in
+            guard let self else { return }
+            let result = self.generateBuffer(for: sentence, voiceID: voiceID)
+            DispatchQueue.main.async {
+                guard self.playbackToken == token else { return }
+                self.generatingIndices.remove(index)
+                guard self.selectedVoiceID == voiceID else { return }
+
+                switch result {
+                case .success(let buffer):
+                    self.bufferedSentenceAudio[index] = buffer
+                    self.bufferedVoiceID = voiceID
+                    self.log("Synthesis done sentence \(index + 1): frames=\(buffer.frameLength)")
+                    let progress = Double(self.bufferedSentenceAudio.count) / Double(max(self.sentences.count, 1))
+                    self.generationProgress = min(1, max(0, progress.isFinite ? progress : 0))
+                    if autoplayWhenReady,
+                       self.currentSentenceIndex == index,
+                       self.playbackPhase != .paused
+                    {
+                        self.scheduleBufferAndPlay(buffer, at: index)
+                    }
+                case .failure(let error):
+                    self.playbackPhase = .idle
+                    self.log("Synthesis failed sentence \(index + 1): \(error.localizedDescription)", level: .error)
+                }
+            }
+        }
+    }
+
     private func log(_ message: String, level: DebugLogEntry.Level = .info) {
         let entry = DebugLogEntry(timestamp: Date(), level: level, message: message)
+        print("[KokoroTestApp] \(message)")
 
         if Thread.isMainThread {
             debugLogs.append(entry)

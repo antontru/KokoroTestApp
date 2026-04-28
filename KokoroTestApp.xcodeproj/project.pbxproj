@@ -7,11 +7,16 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		529799662F2FD51000435877 /* KokoroSwift in Frameworks */ = {isa = PBXBuildFile; productRef = 529799652F2FD51000435877 /* KokoroSwift */; };
-		529799672F2FD53500435877 /* KokoroSwift in Embed Frameworks */ = {isa = PBXBuildFile; productRef = 529799652F2FD51000435877 /* KokoroSwift */; settings = {ATTRIBUTES = (CodeSignOnCopy, ); }; };
-		529799682F2FD60000435877 /* MLXUtilsLibrary in Frameworks */ = {isa = PBXBuildFile; productRef = 529799692F2FD60000435877 /* MLXUtilsLibrary */; };
-		52CA91A62E8A6D4D00C7951A /* kokoro-v1_0.safetensors in Resources */ = {isa = PBXBuildFile; fileRef = 52CA91A52E8A6D4D00C7951A /* kokoro-v1_0.safetensors */; };
-		52E385B32E9EDABD00B10D6C /* voices.npz in Resources */ = {isa = PBXBuildFile; fileRef = 52E385B22E9EDABD00B10D6C /* voices.npz */; };
+		3A3771D12FA00975004BF3B5 /* KokoroONNXSynthesiser.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3A3771D02FA00975004BF3B5 /* KokoroONNXSynthesiser.swift */; };
+		3A3771D32FA00980004BF3B5 /* AudioPlaybackQueue.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3A3771D22FA00980004BF3B5 /* AudioPlaybackQueue.swift */; };
+		3A3771D52FA00BD6004BF3B5 /* config.json in Resources */ = {isa = PBXBuildFile; fileRef = 3A3771D42FA00BCE004BF3B5 /* config.json */; };
+		3A3771D72FA00C0D004BF3B5 /* tokenizer_config.json in Resources */ = {isa = PBXBuildFile; fileRef = 3A3771D62FA00C06004BF3B5 /* tokenizer_config.json */; };
+		5A1000012F30000100ABC001 /* onnxruntime in Frameworks */ = {isa = PBXBuildFile; productRef = 5A1000022F30000100ABC001 /* onnxruntime */; };
+		EA1000012F40000100ABC001 /* libespeak-ng in Frameworks */ = {isa = PBXBuildFile; productRef = EA1000022F40000100ABC001 /* libespeak-ng */; };
+		5A1000102F30000100ABC001 /* model.onnx in Resources */ = {isa = PBXBuildFile; fileRef = 5A1000202F30000100ABC001 /* model.onnx */; };
+		5A1000112F30000100ABC001 /* model_q4.onnx in Resources */ = {isa = PBXBuildFile; fileRef = 5A1000212F30000100ABC001 /* model_q4.onnx */; };
+		5A1000122F30000100ABC001 /* voices.bin in Resources */ = {isa = PBXBuildFile; fileRef = 5A1000222F30000100ABC001 /* voices.bin */; };
+		5A1000132F30000100ABC001 /* tokenizer.json in Resources */ = {isa = PBXBuildFile; fileRef = 5A1000232F30000100ABC001 /* tokenizer.json */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXCopyFilesBuildPhase section */
@@ -21,7 +26,6 @@
 			dstPath = "";
 			dstSubfolderSpec = 10;
 			files = (
-				529799672F2FD53500435877 /* KokoroSwift in Embed Frameworks */,
 			);
 			name = "Embed Frameworks";
 			runOnlyForDeploymentPostprocessing = 0;
@@ -30,9 +34,15 @@
 
 /* Begin PBXFileReference section */
 		3A3771AA2F9FFDEC004BF3B5 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		3A3771D02FA00975004BF3B5 /* KokoroONNXSynthesiser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KokoroONNXSynthesiser.swift; sourceTree = "<group>"; };
+		3A3771D22FA00980004BF3B5 /* AudioPlaybackQueue.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioPlaybackQueue.swift; sourceTree = "<group>"; };
+		3A3771D42FA00BCE004BF3B5 /* config.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = config.json; sourceTree = "<group>"; };
+		3A3771D62FA00C06004BF3B5 /* tokenizer_config.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = tokenizer_config.json; sourceTree = "<group>"; };
 		5247E6922E8A5478003F2FA4 /* KokoroTestApp.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = KokoroTestApp.app; sourceTree = BUILT_PRODUCTS_DIR; };
-		52CA91A52E8A6D4D00C7951A /* kokoro-v1_0.safetensors */ = {isa = PBXFileReference; lastKnownFileType = file; path = "kokoro-v1_0.safetensors"; sourceTree = "<group>"; };
-		52E385B22E9EDABD00B10D6C /* voices.npz */ = {isa = PBXFileReference; lastKnownFileType = file; path = voices.npz; sourceTree = "<group>"; };
+		5A1000202F30000100ABC001 /* model.onnx */ = {isa = PBXFileReference; lastKnownFileType = text; path = onnx/model.onnx; sourceTree = "<group>"; };
+		5A1000212F30000100ABC001 /* model_q4.onnx */ = {isa = PBXFileReference; lastKnownFileType = text; path = onnx/model_q4.onnx; sourceTree = "<group>"; };
+		5A1000222F30000100ABC001 /* voices.bin */ = {isa = PBXFileReference; lastKnownFileType = folder; path = voices; sourceTree = "<group>"; };
+		5A1000232F30000100ABC001 /* tokenizer.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = tokenizer.json; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -48,8 +58,8 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				529799662F2FD51000435877 /* KokoroSwift in Frameworks */,
-				529799682F2FD60000435877 /* MLXUtilsLibrary in Frameworks */,
+				5A1000012F30000100ABC001 /* onnxruntime in Frameworks */,
+				EA1000012F40000100ABC001 /* libespeak-ng in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -64,6 +74,8 @@
 				5297995D2F2FD43900435877 /* Frameworks */,
 				5247E6932E8A5478003F2FA4 /* Products */,
 				3A3771AA2F9FFDEC004BF3B5 /* Info.plist */,
+				3A3771D02FA00975004BF3B5 /* KokoroONNXSynthesiser.swift */,
+				3A3771D22FA00980004BF3B5 /* AudioPlaybackQueue.swift */,
 			);
 			sourceTree = "<group>";
 		};
@@ -85,8 +97,12 @@
 		52CA91A42E8A6C7800C7951A /* Resources */ = {
 			isa = PBXGroup;
 			children = (
-				52E385B22E9EDABD00B10D6C /* voices.npz */,
-				52CA91A52E8A6D4D00C7951A /* kokoro-v1_0.safetensors */,
+				3A3771D62FA00C06004BF3B5 /* tokenizer_config.json */,
+				3A3771D42FA00BCE004BF3B5 /* config.json */,
+				5A1000202F30000100ABC001 /* model.onnx */,
+				5A1000212F30000100ABC001 /* model_q4.onnx */,
+				5A1000222F30000100ABC001 /* voices.bin */,
+				5A1000232F30000100ABC001 /* tokenizer.json */,
 			);
 			path = Resources;
 			sourceTree = "<group>";
@@ -112,8 +128,9 @@
 			);
 			name = KokoroTestApp;
 			packageProductDependencies = (
-				529799652F2FD51000435877 /* KokoroSwift */,
-				529799692F2FD60000435877 /* MLXUtilsLibrary */,
+				5A1000022F30000100ABC001 /* onnxruntime */,
+				EA1000022F40000100ABC001 /* libespeak-ng */,
+				EA1000032F40000100ABC001 /* espeak-ng-data */,
 			);
 			productName = KokoroTestApp;
 			productReference = 5247E6922E8A5478003F2FA4 /* KokoroTestApp.app */;
@@ -144,8 +161,8 @@
 			mainGroup = 5247E6892E8A5478003F2FA4;
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
-				529799642F2FD51000435877 /* XCRemoteSwiftPackageReference "kokoro-ios" */,
-				5297996B2F2FD60000435877 /* XCRemoteSwiftPackageReference "MLXUtilsLibrary" */,
+				5A1000032F30000100ABC001 /* XCRemoteSwiftPackageReference "onnxruntime-swift-package-manager" */,
+				EA1000042F40000100ABC001 /* XCRemoteSwiftPackageReference "espeak-ng-spm" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 5247E6932E8A5478003F2FA4 /* Products */;
@@ -162,8 +179,12 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				52E385B32E9EDABD00B10D6C /* voices.npz in Resources */,
-				52CA91A62E8A6D4D00C7951A /* kokoro-v1_0.safetensors in Resources */,
+				5A1000102F30000100ABC001 /* model.onnx in Resources */,
+				5A1000112F30000100ABC001 /* model_q4.onnx in Resources */,
+				3A3771D52FA00BD6004BF3B5 /* config.json in Resources */,
+				5A1000122F30000100ABC001 /* voices.bin in Resources */,
+				5A1000132F30000100ABC001 /* tokenizer.json in Resources */,
+				3A3771D72FA00C0D004BF3B5 /* tokenizer_config.json in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -174,6 +195,8 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				3A3771D32FA00980004BF3B5 /* AudioPlaybackQueue.swift in Sources */,
+				3A3771D12FA00975004BF3B5 /* KokoroONNXSynthesiser.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -330,7 +353,7 @@
 				INFOPLIST_FILE = Info.plist;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
-								INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				IPHONEOS_DEPLOYMENT_TARGET = 18.6;
@@ -387,7 +410,7 @@
 				INFOPLIST_FILE = Info.plist;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
-								INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				IPHONEOS_DEPLOYMENT_TARGET = 18.6;
@@ -439,34 +462,41 @@
 /* End XCConfigurationList section */
 
 /* Begin XCRemoteSwiftPackageReference section */
-		529799642F2FD51000435877 /* XCRemoteSwiftPackageReference "kokoro-ios" */ = {
+		5A1000032F30000100ABC001 /* XCRemoteSwiftPackageReference "onnxruntime-swift-package-manager" */ = {
 			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/mlalma/kokoro-ios";
+			repositoryURL = "https://github.com/microsoft/onnxruntime-swift-package-manager";
 			requirement = {
 				kind = upToNextMajorVersion;
-				minimumVersion = 1.0.10;
+				minimumVersion = 1.24.2;
 			};
 		};
-		5297996B2F2FD60000435877 /* XCRemoteSwiftPackageReference "MLXUtilsLibrary" */ = {
+
+		EA1000042F40000100ABC001 /* XCRemoteSwiftPackageReference "espeak-ng-spm" */ = {
 			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/mlalma/MLXUtilsLibrary.git";
+			repositoryURL = "https://github.com/espeak-ng/espeak-ng-spm.git";
 			requirement = {
-				kind = upToNextMajorVersion;
-				minimumVersion = 0.0.6;
+				kind = branch;
+				branch = master;
 			};
 		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
-		529799652F2FD51000435877 /* KokoroSwift */ = {
+		5A1000022F30000100ABC001 /* onnxruntime */ = {
 			isa = XCSwiftPackageProductDependency;
-			package = 529799642F2FD51000435877 /* XCRemoteSwiftPackageReference "kokoro-ios" */;
-			productName = KokoroSwift;
+			package = 5A1000032F30000100ABC001 /* XCRemoteSwiftPackageReference "onnxruntime-swift-package-manager" */;
+			productName = onnxruntime;
 		};
-		529799692F2FD60000435877 /* MLXUtilsLibrary */ = {
+
+		EA1000022F40000100ABC001 /* libespeak-ng */ = {
 			isa = XCSwiftPackageProductDependency;
-			package = 5297996B2F2FD60000435877 /* XCRemoteSwiftPackageReference "MLXUtilsLibrary" */;
-			productName = MLXUtilsLibrary;
+			package = EA1000042F40000100ABC001 /* XCRemoteSwiftPackageReference "espeak-ng-spm" */;
+			productName = libespeak-ng;
+		};
+		EA1000032F40000100ABC001 /* espeak-ng-data */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = EA1000042F40000100ABC001 /* XCRemoteSwiftPackageReference "espeak-ng-spm" */;
+			productName = espeak-ng-data;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

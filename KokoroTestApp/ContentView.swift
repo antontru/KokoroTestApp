@@ -143,15 +143,7 @@ struct ContentView: View {
 
         isEditorFocused = false
         isReadView = true
-        if viewModel.playbackPhase == .generating {
-            return
-        }
-
-        if viewModel.isPlaybackPrepared {
-            viewModel.togglePlay(using: inputText)
-        } else {
-            viewModel.preparePlayback(using: inputText, autoPlay: false)
-        }
+        viewModel.togglePlay(using: inputText)
     }
 
     private func handleImportResult(_ result: Result<[URL], Error>) {
@@ -347,63 +339,65 @@ private struct PlayerBar: View {
     let onPrimaryAction: () -> Void
 
     var body: some View {
-        VStack(spacing: 10) {
-            if viewModel.playbackPhase == .generating {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Generating Audio…")
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(.white)
+        VStack(spacing: 12) {
+            VStack(spacing: 8) {
+                HStack(spacing: 10) {
+                    Image(systemName: "waveform.circle.fill")
+                        .font(.title3)
+                        .foregroundStyle(Color.green.opacity(0.95))
 
-                    ProgressView(value: viewModel.generationProgress, total: 1)
-                        .tint(.green)
-
-                    Text("\(Int((viewModel.generationProgress * 100).rounded()))%")
-                        .font(.caption)
-                        .foregroundStyle(.gray)
-                }
-            } else if viewModel.isPlaybackPrepared {
-                if !viewModel.sentences.isEmpty {
-                    Text("\(currentDisplayIndex) / \(viewModel.sentences.count)")
-                        .font(.subheadline)
-                        .foregroundStyle(.gray)
-                }
-
-                HStack(spacing: 20) {
-                    playerButton(systemImage: "backward.end.fill", disabled: !viewModel.hasLoadedText) {
-                        viewModel.skipPrevious()
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(statusTitle)
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(.white)
+                        Text(statusSubtitle)
+                            .font(.caption)
+                            .foregroundStyle(.gray)
                     }
 
-                    playPauseButton
-
-                    playerButton(systemImage: "stop.fill", disabled: !viewModel.hasLoadedText) {
-                        viewModel.stopPlayback()
-                    }
-
-                    playerButton(systemImage: "forward.end.fill", disabled: !viewModel.hasLoadedText) {
-                        viewModel.skipNext()
+                    Spacer()
+                    if viewModel.playbackPhase == .generating {
+                        ProgressView()
+                            .tint(.green)
                     }
                 }
-            } else {
-                Button(action: onPrimaryAction) {
-                    HStack(spacing: 10) {
-                        Image(systemName: "waveform")
-                        Text("Generate Audio")
-                            .fontWeight(.semibold)
-                    }
-                    .foregroundStyle(.white)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 14)
-                    .background(Color.green.opacity(canPlay ? 0.95 : 0.45))
-                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+
+                ProgressView(value: viewModel.generationProgress, total: 1)
+                    .tint(.green)
+            }
+            .padding(.horizontal, 14)
+            .padding(.top, 12)
+
+            HStack(spacing: 18) {
+                playerButton(systemImage: "backward.end.fill", disabled: !viewModel.hasLoadedText) {
+                    viewModel.skipPrevious()
                 }
-                .disabled(!canPlay)
+
+                playPauseButton
+
+                playerButton(systemImage: "stop.fill", disabled: !viewModel.hasLoadedText) {
+                    viewModel.stopPlayback()
+                }
+
+                playerButton(systemImage: "forward.end.fill", disabled: !viewModel.hasLoadedText) {
+                    viewModel.skipNext()
+                }
             }
         }
         .frame(maxWidth: .infinity)
-        .padding(.top, 12)
-        .padding(.bottom, 18)
         .padding(.horizontal, 16)
-        .background(Color(red: 0.02, green: 0.03, blue: 0.08))
+        .padding(.top, 10)
+        .padding(.bottom, 18)
+        .background(
+            LinearGradient(
+                colors: [
+                    Color(red: 0.05, green: 0.06, blue: 0.1),
+                    Color(red: 0.02, green: 0.03, blue: 0.08),
+                ],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+        )
         .overlay(alignment: .top) {
             Divider().overlay(Color.white.opacity(0.1))
         }
@@ -417,7 +411,29 @@ private struct PlayerBar: View {
     }
 
     private var playButtonDisabled: Bool {
-        !canPlay || viewModel.playbackPhase == .generating
+        !canPlay
+    }
+
+    private var statusTitle: String {
+        switch viewModel.playbackPhase {
+        case .playing:
+            return "Now Playing"
+        case .paused:
+            return "Paused"
+        case .generating:
+            return "Buffering Speech"
+        case .done:
+            return "Playback Complete"
+        case .idle:
+            return "Ready"
+        }
+    }
+
+    private var statusSubtitle: String {
+        if viewModel.sentences.isEmpty {
+            return "Paste text or import a file to begin"
+        }
+        return "\(currentDisplayIndex) / \(viewModel.sentences.count)"
     }
 
     @ViewBuilder
@@ -441,6 +457,7 @@ private struct PlayerBar: View {
             }
         }
         .disabled(playButtonDisabled)
+        .shadow(color: Color.green.opacity(0.35), radius: 12, x: 0, y: 6)
     }
 
     private func playerButton(systemImage: String, disabled: Bool, action: @escaping () -> Void) -> some View {
@@ -523,6 +540,24 @@ private struct SettingsSheet: View {
                         .foregroundStyle(.gray)
                     }
                     .padding(.vertical, 4)
+                }
+
+                Section("Model") {
+                    Picker("Variant", selection: Binding(
+                        get: { viewModel.modelVariant },
+                        set: { viewModel.updateModelVariant($0) }
+                    )) {
+                        ForEach(KokoroONNXSynthesiser.ModelVariant.allCases) { variant in
+                            Text(variant.displayName).tag(variant)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+
+                    if let warning = viewModel.coreMLWarningMessage {
+                        Text(warning)
+                            .font(.caption)
+                            .foregroundStyle(.yellow)
+                    }
                 }
             }
             .navigationTitle("Settings")
