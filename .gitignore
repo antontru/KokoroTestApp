@@ -60,3 +60,6 @@ fastlane/report.xml
 fastlane/Preview.html
 fastlane/screenshots/**/*.png
 fastlane/test_output
+Resources/onnx/
+Resources/onnx/*.onnx
+Resources/onnx/
