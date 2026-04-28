@@ -154,9 +154,10 @@ final class KokoroONNXSynthesiser {
     }
 
     private func tokenize(_ text: String, voiceID: String) -> [Int64] {
-        let normalized = text.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalized = normalizeTextForKokoro(text)
         let language = voiceID.hasPrefix("b") ? "en-gb" : "en-us"
-        let phonemes = Self.phonemizeWithEspeak(normalized, language: language) ?? phonemizeEnglishHeuristic(normalized)
+        var phonemes = Self.phonemizeWithEspeak(normalized, language: language) ?? phonemizeEnglishHeuristic(normalized.lowercased())
+        phonemes = postProcessPhonemes(phonemes, language: language)
         let payload = Array(phonemes.prefix(510))
         var tokens = [Int64]()
         tokens.reserveCapacity(payload.count + 2)
@@ -166,12 +167,56 @@ final class KokoroONNXSynthesiser {
                 tokens.append(id)
             } else if character.isWhitespace, let spaceID = tokenizerVocab[" "] {
                 tokens.append(spaceID)
-            } else {
-                tokens.append(padTokenID)
             }
         }
         tokens.append(padTokenID)
         return tokens
+    }
+
+    private func normalizeTextForKokoro(_ raw: String) -> String {
+        var text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return text }
+
+        let ns = text as NSString
+        if let regex = try? NSRegularExpression(pattern: "\\b[A-Z]{2,6}\\b") {
+            let matches = regex.matches(in: text, range: NSRange(location: 0, length: ns.length)).reversed()
+            for match in matches {
+                let word = ns.substring(with: match.range)
+                let expanded = word.map { String($0) }.joined(separator: " ")
+                text = (text as NSString).replacingCharacters(in: match.range, with: expanded)
+            }
+        }
+
+        text = text
+            .replacingOccurrences(of: "“", with: "\"")
+            .replacingOccurrences(of: "”", with: "\"")
+            .replacingOccurrences(of: "’", with: "'")
+            .replacingOccurrences(of: "—", with: " — ")
+            .replacingOccurrences(of: "…", with: " ... ")
+        return text
+    }
+
+    private func postProcessPhonemes(_ phonemes: String, language: String) -> String {
+        var ps = phonemes
+            .replacingOccurrences(of: "kəkˈoːɹoʊ", with: "kˈoʊkəɹoʊ")
+            .replacingOccurrences(of: "kəkˈɔːɹəʊ", with: "kˈəʊkəɹəʊ")
+            .replacingOccurrences(of: "ʲ", with: "j")
+            .replacingOccurrences(of: "r", with: "ɹ")
+            .replacingOccurrences(of: "x", with: "k")
+            .replacingOccurrences(of: "ɬ", with: "l")
+
+        if let r1 = try? NSRegularExpression(pattern: "(?<=[a-zɹː])(?=hˈʌndɹɪd)") {
+            ps = r1.stringByReplacingMatches(in: ps, range: NSRange(ps.startIndex..., in: ps), withTemplate: " ")
+        }
+        if let r2 = try? NSRegularExpression(pattern: " z(?=[;:,.!?¡¿—…\"«»“” ]|$)") {
+            ps = r2.stringByReplacingMatches(in: ps, range: NSRange(ps.startIndex..., in: ps), withTemplate: "z")
+        }
+        if language == "en-us", let r3 = try? NSRegularExpression(pattern: "(?<=nˈaɪn)ti(?!ː)") {
+            ps = r3.stringByReplacingMatches(in: ps, range: NSRange(ps.startIndex..., in: ps), withTemplate: "di")
+        }
+
+        ps = String(ps.filter { tokenizerVocab[$0] != nil || $0.isWhitespace })
+        return ps.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private func phonemizeEnglishHeuristic(_ text: String) -> String {
@@ -484,39 +529,48 @@ final class KokoroONNXSynthesiser {
         guard ensureEspeakInitialized() else { return nil }
 
         return withEspeakQueue {
-            // Keep punctuation so Kokoro can infer pauses.
             let mode = Int32(espeakPHONEMES_IPA | espeakPHONEMES_TIE)
-            var input = Array(text.utf8CString)
             let charsMode = Int32(espeakCHARS_UTF8)
-            var result: String?
+            var result = ""
 
-            if espeak_ng_SetVoiceByName(language) != ENS_OK {
-                _ = espeak_ng_SetVoiceByName("en-us")
+            if espeak_ng_SetVoiceByName(language) != ENS_OK,
+               espeak_ng_SetVoiceByName("en-us") != ENS_OK
+            {
+                return nil
             }
 
-            input.withUnsafeMutableBufferPointer { buffer in
-                guard var ptr = buffer.baseAddress else {
-                    result = nil
-                    return
-                }
-                var textPtr: UnsafeRawPointer? = UnsafeRawPointer(ptr)
-
-                var output = ""
-                while let phonemePtr = espeak_TextToPhonemes(&textPtr, charsMode, mode) {
-                    let chunk = String(cString: phonemePtr)
-                    if chunk.isEmpty {
-                        break
+            var word = ""
+            func flushWord() {
+                guard !word.isEmpty else { return }
+                var input = Array(word.utf8CString)
+                input.withUnsafeMutableBufferPointer { buffer in
+                    guard var ptr = buffer.baseAddress else { return }
+                    var textPtr: UnsafeRawPointer? = UnsafeRawPointer(ptr)
+                    while let phonemePtr = espeak_TextToPhonemes(&textPtr, charsMode, mode) {
+                        let chunk = String(cString: phonemePtr)
+                        if chunk.isEmpty { break }
+                        result += chunk
                     }
-                    output += chunk
                 }
-
-                let cleaned = output
-                    .replacingOccurrences(of: "_", with: " ")
-                    .replacingOccurrences(of: "\n", with: " ")
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                result = cleaned.isEmpty ? nil : cleaned
+                word.removeAll(keepingCapacity: true)
             }
-            return result
+
+            for ch in text {
+                if ch.isLetter || ch == "'" {
+                    word.append(ch)
+                } else {
+                    flushWord()
+                    result.append(ch)
+                }
+            }
+            flushWord()
+
+            let cleaned = result
+                .replacingOccurrences(of: "_", with: " ")
+                .replacingOccurrences(of: "\n", with: " ")
+                .replacingOccurrences(of: "  ", with: " ")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return cleaned.isEmpty ? nil : cleaned
         }
     }
 
