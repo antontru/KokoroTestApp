@@ -45,7 +45,7 @@ final class TestAppModel: ObservableObject {
     @Published var voiceOptions: [VoiceOption] = []
     @Published var selectedVoiceID: String = ""
     @Published var speed: Double = 1.0
-    @Published var modelVariant: KokoroONNXSynthesiser.ModelVariant = .q4
+    @Published var modelVariant: KokoroONNXSynthesiser.ModelVariant = .quantized
     @Published var coreMLWarningMessage: String?
 
     @Published var sentences: [String] = []
@@ -79,6 +79,7 @@ final class TestAppModel: ObservableObject {
     private var bufferedVoiceID: String?
     private var generatingIndices: Set<Int> = []
     private let lookAheadSentenceCount = 3
+    private let retainedSentenceWindow = 1
 
     private var loadedText: String = ""
     private let defaults = UserDefaults.standard
@@ -310,7 +311,15 @@ final class TestAppModel: ObservableObject {
         speed = min(2.0, max(0.5, savedSpeed))
 
         let savedVariant = defaults.string(forKey: modelVariantDefaultsKey)
-        modelVariant = KokoroONNXSynthesiser.ModelVariant(rawValue: savedVariant ?? "") ?? .q4
+        if let savedVariant, let parsed = KokoroONNXSynthesiser.ModelVariant(rawValue: savedVariant) {
+            modelVariant = parsed
+        } else {
+            if let savedVariant {
+                log("Unknown persisted model variant '\(savedVariant)'; falling back to Quantized (8-bit)", level: .warning)
+            }
+            modelVariant = .quantized
+            defaults.set(modelVariant.rawValue, forKey: modelVariantDefaultsKey)
+        }
     }
 
     private func createSynthesiser() {
@@ -341,6 +350,7 @@ final class TestAppModel: ObservableObject {
     private func logBundledResourceStatus() {
         let fileNames = [
             "onnx/model.onnx",
+            "onnx/model_quantized.onnx",
             "onnx/model_q4.onnx",
             "voices/af_heart.bin",
             "tokenizer.json",
@@ -473,11 +483,10 @@ final class TestAppModel: ObservableObject {
 
     private func loadText(_ text: String) {
         invalidateSynthesisTokens()
+        synthesiser?.clearCache()
         loadedText = text
         sentences = tokenizeSentences(from: text)
         currentSentenceIndex = nil
-        bufferedSentenceAudio = [:]
-        bufferedVoiceID = nil
         generationProgress = 0
 
         if sentences.isEmpty {
@@ -588,12 +597,7 @@ final class TestAppModel: ObservableObject {
         }
 
         currentSentenceIndex = nextIndex
-
-        guard currentSentenceIndex == nextIndex else {
-            log("Skipping re-entrant scheduling: current sentence mutated during completion handling", level: .warning)
-            return
-        }
-
+        pruneBufferedAudio(around: nextIndex)
         if let cachedBuffer = bufferedSentenceAudio[nextIndex] {
             scheduleBufferAndPlay(cachedBuffer, at: nextIndex)
         } else {
@@ -709,6 +713,8 @@ final class TestAppModel: ObservableObject {
     @objc
     private func handleWillResignActive() {
         isAppActive = false
+        invalidateSynthesisTokens()
+        synthesiser?.clearCache()
         log("App moved to inactive/background state")
     }
 
@@ -744,6 +750,7 @@ final class TestAppModel: ObservableObject {
         pendingResumeIndex = nil
         currentSentenceIndex = index
         bufferedVoiceID = selectedVoiceID
+        pruneBufferedAudio(around: index)
         playerNode.stop()
 
         if let cachedBuffer = bufferedSentenceAudio[index] {
@@ -798,6 +805,7 @@ final class TestAppModel: ObservableObject {
                 case .success(let buffer):
                     self.bufferedSentenceAudio[index] = buffer
                     self.bufferedVoiceID = voiceID
+                    self.pruneBufferedAudio(around: self.currentSentenceIndex ?? index)
                     self.log("Synthesis done sentence \(index + 1): frames=\(buffer.frameLength)")
                     let progress = Double(self.bufferedSentenceAudio.count) / Double(max(self.sentences.count, 1))
                     self.generationProgress = min(1, max(0, progress.isFinite ? progress : 0))
@@ -826,6 +834,15 @@ final class TestAppModel: ObservableObject {
                 }
             }
         }
+    }
+
+    private func pruneBufferedAudio(around centerIndex: Int) {
+        let lowerBound = max(0, centerIndex - retainedSentenceWindow)
+        let upperBound = min(sentences.count - 1, centerIndex + lookAheadSentenceCount)
+        bufferedSentenceAudio = bufferedSentenceAudio.filter { index, _ in
+            (lowerBound...upperBound).contains(index)
+        }
+        generatingIndices = generatingIndices.filter { (lowerBound...upperBound).contains($0) }
     }
 
     private func log(_ message: String, level: DebugLogEntry.Level = .info) {
