@@ -41,7 +41,9 @@ final class KokoroONNXSynthesiser {
     private let cacheLock = NSLock()
     private var bufferCache: [String: AVAudioPCMBuffer] = [:]
     private var cacheOrder: [String] = []
-    private let maxCachedSentences = 128
+    private var cachedAudioBytes = 0
+    private let maxCachedSentences = 32
+    private let maxCachedAudioBytes = 64 * 1024 * 1024
 
     private let voiceIDs: Set<String>
     private let voiceDataLock = NSLock()
@@ -150,7 +152,12 @@ final class KokoroONNXSynthesiser {
         cacheLock.lock()
         bufferCache.removeAll()
         cacheOrder.removeAll()
+        cachedAudioBytes = 0
         cacheLock.unlock()
+    }
+
+    private func estimatedByteCount(for buffer: AVAudioPCMBuffer) -> Int {
+        Int(buffer.frameLength) * Int(buffer.format.channelCount) * MemoryLayout<Float>.size
     }
 
     private func tokenize(_ text: String, voiceID: String) -> [Int64] {
@@ -418,14 +425,20 @@ final class KokoroONNXSynthesiser {
         cacheLock.lock()
         defer { cacheLock.unlock() }
 
-        if bufferCache[key] == nil {
+        let newBytes = estimatedByteCount(for: buffer)
+        if let existing = bufferCache[key] {
+            cachedAudioBytes -= estimatedByteCount(for: existing)
+        } else {
             cacheOrder.append(key)
         }
         bufferCache[key] = buffer
+        cachedAudioBytes += newBytes
 
-        while cacheOrder.count > maxCachedSentences {
+        while cacheOrder.count > maxCachedSentences || cachedAudioBytes > maxCachedAudioBytes {
             let oldest = cacheOrder.removeFirst()
-            bufferCache.removeValue(forKey: oldest)
+            if let removed = bufferCache.removeValue(forKey: oldest) {
+                cachedAudioBytes -= estimatedByteCount(for: removed)
+            }
         }
     }
 
