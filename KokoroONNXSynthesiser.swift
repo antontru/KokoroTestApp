@@ -191,9 +191,25 @@ final class KokoroONNXSynthesiser {
             .replacingOccurrences(of: "“", with: "\"")
             .replacingOccurrences(of: "”", with: "\"")
             .replacingOccurrences(of: "’", with: "'")
-            .replacingOccurrences(of: "—", with: " — ")
             .replacingOccurrences(of: "…", with: " ... ")
-        return text
+
+        // Preserve single hyphens inside words (for compound words like report-creation),
+        // while normalizing dash-like clause separators into a canonical em dash boundary.
+        if let internalHyphenRegex = try? NSRegularExpression(pattern: "(?<=\\p{L})-(?=\\p{L})") {
+            text = internalHyphenRegex.stringByReplacingMatches(in: text, range: NSRange(text.startIndex..., in: text), withTemplate: "{{HYPHEN}}")
+        }
+
+        if let dashSeparatorRegex = try? NSRegularExpression(pattern: "\\s*(?:--+|[—–−])\\s*") {
+            text = dashSeparatorRegex.stringByReplacingMatches(in: text, range: NSRange(text.startIndex..., in: text), withTemplate: " — ")
+        }
+
+        text = text.replacingOccurrences(of: "{{HYPHEN}}", with: "-")
+
+        if let spaceRegex = try? NSRegularExpression(pattern: "\\s+") {
+            text = spaceRegex.stringByReplacingMatches(in: text, range: NSRange(text.startIndex..., in: text), withTemplate: " ")
+        }
+
+        return text.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private func postProcessPhonemes(_ phonemes: String, language: String) -> String {
@@ -208,7 +224,7 @@ final class KokoroONNXSynthesiser {
         if let r1 = try? NSRegularExpression(pattern: "(?<=[a-zɹː])(?=hˈʌndɹɪd)") {
             ps = r1.stringByReplacingMatches(in: ps, range: NSRange(ps.startIndex..., in: ps), withTemplate: " ")
         }
-        if let r2 = try? NSRegularExpression(pattern: " z(?=[;:,.!?¡¿—…\"«»“” ]|$)") {
+        if let r2 = try? NSRegularExpression(pattern: " z(?=[;:,.!?¡¿—–−-…\"«»“” ]|$)") {
             ps = r2.stringByReplacingMatches(in: ps, range: NSRange(ps.startIndex..., in: ps), withTemplate: "z")
         }
         if language == "en-us", let r3 = try? NSRegularExpression(pattern: "(?<=nˈaɪn)ti(?!ː)") {
