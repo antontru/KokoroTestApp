@@ -760,6 +760,7 @@ final class TestAppModel: ObservableObject {
     @objc
     private func handleDidReceiveMemoryWarning() {
         shouldConserveMemory = true
+        synthesiser?.clearCache()
         trimBuffersToCurrentWindow(reason: "iOS memory warning", forceAggressive: true)
     }
     #endif
@@ -867,7 +868,7 @@ final class TestAppModel: ObservableObject {
 
     private func pruneBufferedAudio(around centerIndex: Int) {
         let lowerBound = max(0, centerIndex - retainedSentenceWindow)
-        let upperBound = min(sentences.count - 1, centerIndex + lookAheadSentenceCount)
+        let upperBound = min(sentences.count - 1, centerIndex + currentLookAheadSentenceCount)
         bufferedSentenceAudio = bufferedSentenceAudio.filter { index, _ in
             (lowerBound...upperBound).contains(index)
         }
