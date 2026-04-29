@@ -6,6 +6,7 @@ import libespeak_ng
 final class KokoroONNXSynthesiser {
     enum ModelVariant: String, CaseIterable, Identifiable {
         case full
+        case quantized
         case q4
 
         var id: String { rawValue }
@@ -14,6 +15,8 @@ final class KokoroONNXSynthesiser {
             switch self {
             case .full:
                 return "Standard"
+            case .quantized:
+                return "Quantized (8-bit)"
             case .q4:
                 return "Quantised Q4"
             }
@@ -23,6 +26,8 @@ final class KokoroONNXSynthesiser {
             switch self {
             case .full:
                 return "model.onnx"
+            case .quantized:
+                return "model_quantized.onnx"
             case .q4:
                 return "model_q4.onnx"
             }
