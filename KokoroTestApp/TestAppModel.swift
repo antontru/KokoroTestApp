@@ -46,6 +46,7 @@ final class TestAppModel: ObservableObject {
     @Published var selectedVoiceID: String = ""
     @Published var speed: Double = 1.0
     @Published var modelVariant: KokoroONNXSynthesiser.ModelVariant = .q4
+    @Published var lowMemoryModeEnabled: Bool = false
     @Published var coreMLWarningMessage: String?
 
     @Published var sentences: [String] = []
@@ -73,12 +74,17 @@ final class TestAppModel: ObservableObject {
 
     private var playbackToken = UUID()
     private var isAppActive = true
+    private var shouldConserveMemory = false
     private var pendingResumeIndex: Int?
 
     private var bufferedSentenceAudio: [Int: AVAudioPCMBuffer] = [:]
     private var bufferedVoiceID: String?
     private var generatingIndices: Set<Int> = []
-    private let lookAheadSentenceCount = 3
+    private let defaultLookAheadSentenceCount = 3
+    private let lowMemoryLookAheadSentenceCount = 1
+    private let backgroundLookAheadSentenceCount = 0
+    private let defaultCacheSentenceLimit = 6
+    private let lowMemoryCacheSentenceLimit = 2
 
     private var loadedText: String = ""
     private let defaults = UserDefaults.standard
@@ -86,6 +92,7 @@ final class TestAppModel: ObservableObject {
     private let selectedVoiceDefaultsKey = "kokoro.selectedVoiceID"
     private let speedDefaultsKey = "kokoro.speed"
     private let modelVariantDefaultsKey = "kokoro_model_variant"
+    private let lowMemoryModeDefaultsKey = "kokoro_low_memory_mode"
 
     init() {
         configureVoices()
@@ -95,6 +102,7 @@ final class TestAppModel: ObservableObject {
         createSynthesiser()
         configureInterruptions()
         configureRemoteCommands()
+        logStartupConfiguration()
         log("Model initialized with \(voiceOptions.count) voices")
     }
 
@@ -309,6 +317,7 @@ final class TestAppModel: ObservableObject {
 
         let savedVariant = defaults.string(forKey: modelVariantDefaultsKey)
         modelVariant = KokoroONNXSynthesiser.ModelVariant(rawValue: savedVariant ?? "") ?? .q4
+        lowMemoryModeEnabled = defaults.bool(forKey: lowMemoryModeDefaultsKey)
     }
 
     private func createSynthesiser() {
@@ -421,6 +430,12 @@ final class TestAppModel: ObservableObject {
             self,
             selector: #selector(handleDidBecomeActive),
             name: UIApplication.didBecomeActiveNotification,
+            object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleDidReceiveMemoryWarning),
+            name: UIApplication.didReceiveMemoryWarningNotification,
             object: nil
         )
         #endif
@@ -692,12 +707,15 @@ final class TestAppModel: ObservableObject {
     @objc
     private func handleWillResignActive() {
         isAppActive = false
+        shouldConserveMemory = true
+        trimBuffersToCurrentWindow(reason: "app entered background", forceAggressive: true)
         log("App moved to inactive/background state")
     }
 
     @objc
     private func handleDidBecomeActive() {
         isAppActive = true
+        shouldConserveMemory = false
         do {
             let audioSession = AVAudioSession.sharedInstance()
             try audioSession.setActive(true)
@@ -712,6 +730,12 @@ final class TestAppModel: ObservableObject {
             startStreamingPlayback(at: pendingResumeIndex)
         }
         log("App is active")
+    }
+
+    @objc
+    private func handleDidReceiveMemoryWarning() {
+        shouldConserveMemory = true
+        trimBuffersToCurrentWindow(reason: "iOS memory warning", forceAggressive: true)
     }
     #endif
 
@@ -741,7 +765,9 @@ final class TestAppModel: ObservableObject {
 
     private func prefetchLookAhead(from startIndex: Int, token: UUID) {
         guard startIndex < sentences.count else { return }
-        let endIndex = min(sentences.count, startIndex + lookAheadSentenceCount)
+        let lookAheadCount = currentLookAheadSentenceCount
+        guard lookAheadCount > 0 else { return }
+        let endIndex = min(sentences.count, startIndex + lookAheadCount)
         for index in startIndex..<endIndex {
             requestBufferIfNeeded(at: index, token: token, autoplayWhenReady: false)
         }
@@ -767,6 +793,7 @@ final class TestAppModel: ObservableObject {
                 switch result {
                 case .success(let buffer):
                     self.bufferedSentenceAudio[index] = buffer
+                    self.enforceCachePolicy()
                     self.bufferedVoiceID = voiceID
                     self.log("Synthesis done sentence \(index + 1): frames=\(buffer.frameLength)")
                     let progress = Double(self.bufferedSentenceAudio.count) / Double(max(self.sentences.count, 1))
@@ -796,5 +823,73 @@ final class TestAppModel: ObservableObject {
                 self.debugLogs.append(entry)
             }
         }
+    }
+
+    var memoryPolicyDescription: String {
+        "lookAhead=\(currentLookAheadSentenceCount), cacheLimit=\(currentCacheSentenceLimit), lowMemoryMode=\(lowMemoryModeEnabled ? "on" : "off"), conserveMemory=\(shouldConserveMemory ? "yes" : "no"), appActive=\(isAppActive ? "yes" : "no")"
+    }
+
+    func setLowMemoryModeEnabled(_ enabled: Bool) {
+        guard lowMemoryModeEnabled != enabled else { return }
+        lowMemoryModeEnabled = enabled
+        defaults.set(enabled, forKey: lowMemoryModeDefaultsKey)
+        trimBuffersToCurrentWindow(reason: "low memory mode \(enabled ? "enabled" : "disabled")", forceAggressive: enabled)
+    }
+
+    private var currentLookAheadSentenceCount: Int {
+        if !isAppActive {
+            return backgroundLookAheadSentenceCount
+        }
+        if shouldConserveMemory {
+            return 1
+        }
+        return lowMemoryModeEnabled ? lowMemoryLookAheadSentenceCount : defaultLookAheadSentenceCount
+    }
+
+    private var currentCacheSentenceLimit: Int {
+        lowMemoryModeEnabled ? lowMemoryCacheSentenceLimit : defaultCacheSentenceLimit
+    }
+
+    private func enforceCachePolicy() {
+        guard bufferedSentenceAudio.count > currentCacheSentenceLimit else { return }
+        let sortedIndices = bufferedSentenceAudio.keys.sorted()
+        let keepIndices = Set(idealCacheIndices())
+        for idx in sortedIndices where !keepIndices.contains(idx) {
+            bufferedSentenceAudio.removeValue(forKey: idx)
+            if bufferedSentenceAudio.count <= currentCacheSentenceLimit {
+                break
+            }
+        }
+    }
+
+    private func idealCacheIndices() -> [Int] {
+        guard let currentSentenceIndex else {
+            return Array(bufferedSentenceAudio.keys.sorted().prefix(currentCacheSentenceLimit))
+        }
+
+        let upperBound = min(sentences.count - 1, currentSentenceIndex + currentLookAheadSentenceCount)
+        if upperBound < currentSentenceIndex { return [currentSentenceIndex] }
+        return Array(currentSentenceIndex...upperBound)
+    }
+
+    private func trimBuffersToCurrentWindow(reason: String, forceAggressive: Bool) {
+        guard !bufferedSentenceAudio.isEmpty else { return }
+
+        if forceAggressive {
+            bufferedSentenceAudio.removeAll()
+            generatingIndices.removeAll()
+            generationProgress = 0
+            log("Aggressively cleared synthesis + sentence buffers (\(reason))", level: .warning)
+            return
+        }
+
+        let keepIndices = Set(idealCacheIndices())
+        bufferedSentenceAudio = bufferedSentenceAudio.filter { keepIndices.contains($0.key) }
+        enforceCachePolicy()
+        log("Trimmed sentence cache (\(reason)); policy: \(memoryPolicyDescription)")
+    }
+
+    private func logStartupConfiguration() {
+        log("Startup config: model=\(modelVariant.displayName), policy={\(memoryPolicyDescription)}")
     }
 }
