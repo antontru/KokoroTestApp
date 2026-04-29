@@ -45,7 +45,7 @@ final class TestAppModel: ObservableObject {
     @Published var voiceOptions: [VoiceOption] = []
     @Published var selectedVoiceID: String = ""
     @Published var speed: Double = 1.0
-    @Published var modelVariant: KokoroONNXSynthesiser.ModelVariant = .q4
+    @Published var modelVariant: KokoroONNXSynthesiser.ModelVariant = .quantized
     @Published var coreMLWarningMessage: String?
 
     @Published var sentences: [String] = []
@@ -308,7 +308,15 @@ final class TestAppModel: ObservableObject {
         speed = min(2.0, max(0.5, savedSpeed))
 
         let savedVariant = defaults.string(forKey: modelVariantDefaultsKey)
-        modelVariant = KokoroONNXSynthesiser.ModelVariant(rawValue: savedVariant ?? "") ?? .q4
+        if let savedVariant, let parsed = KokoroONNXSynthesiser.ModelVariant(rawValue: savedVariant) {
+            modelVariant = parsed
+        } else {
+            if let savedVariant {
+                log("Unknown persisted model variant '\(savedVariant)'; falling back to Quantized (8-bit)", level: .warning)
+            }
+            modelVariant = .quantized
+            defaults.set(modelVariant.rawValue, forKey: modelVariantDefaultsKey)
+        }
     }
 
     private func createSynthesiser() {
@@ -339,6 +347,7 @@ final class TestAppModel: ObservableObject {
     private func logBundledResourceStatus() {
         let fileNames = [
             "onnx/model.onnx",
+            "onnx/model_quantized.onnx",
             "onnx/model_q4.onnx",
             "voices/af_heart.bin",
             "tokenizer.json",
