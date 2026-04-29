@@ -14,6 +14,7 @@
 		5A1000012F30000100ABC001 /* onnxruntime in Frameworks */ = {isa = PBXBuildFile; productRef = 5A1000022F30000100ABC001 /* onnxruntime */; };
 		EA1000012F40000100ABC001 /* libespeak-ng in Frameworks */ = {isa = PBXBuildFile; productRef = EA1000022F40000100ABC001 /* libespeak-ng */; };
 		5A1000102F30000100ABC001 /* model.onnx in Resources */ = {isa = PBXBuildFile; fileRef = 5A1000202F30000100ABC001 /* model.onnx */; };
+		5A1000142F30000100ABC001 /* model_quantized.onnx in Resources */ = {isa = PBXBuildFile; fileRef = 5A1000242F30000100ABC001 /* model_quantized.onnx */; };
 		5A1000112F30000100ABC001 /* model_q4.onnx in Resources */ = {isa = PBXBuildFile; fileRef = 5A1000212F30000100ABC001 /* model_q4.onnx */; };
 		5A1000122F30000100ABC001 /* voices.bin in Resources */ = {isa = PBXBuildFile; fileRef = 5A1000222F30000100ABC001 /* voices.bin */; };
 		5A1000132F30000100ABC001 /* tokenizer.json in Resources */ = {isa = PBXBuildFile; fileRef = 5A1000232F30000100ABC001 /* tokenizer.json */; };
@@ -40,6 +41,7 @@
 		3A3771D62FA00C06004BF3B5 /* tokenizer_config.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = tokenizer_config.json; sourceTree = "<group>"; };
 		5247E6922E8A5478003F2FA4 /* KokoroTestApp.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = KokoroTestApp.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		5A1000202F30000100ABC001 /* model.onnx */ = {isa = PBXFileReference; lastKnownFileType = text; path = onnx/model.onnx; sourceTree = "<group>"; };
+		5A1000242F30000100ABC001 /* model_quantized.onnx */ = {isa = PBXFileReference; lastKnownFileType = text; path = onnx/model_quantized.onnx; sourceTree = "<group>"; };
 		5A1000212F30000100ABC001 /* model_q4.onnx */ = {isa = PBXFileReference; lastKnownFileType = text; path = onnx/model_q4.onnx; sourceTree = "<group>"; };
 		5A1000222F30000100ABC001 /* voices.bin */ = {isa = PBXFileReference; lastKnownFileType = folder; path = voices; sourceTree = "<group>"; };
 		5A1000232F30000100ABC001 /* tokenizer.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = tokenizer.json; sourceTree = "<group>"; };
@@ -100,6 +102,7 @@
 				3A3771D62FA00C06004BF3B5 /* tokenizer_config.json */,
 				3A3771D42FA00BCE004BF3B5 /* config.json */,
 				5A1000202F30000100ABC001 /* model.onnx */,
+				5A1000242F30000100ABC001 /* model_quantized.onnx */,
 				5A1000212F30000100ABC001 /* model_q4.onnx */,
 				5A1000222F30000100ABC001 /* voices.bin */,
 				5A1000232F30000100ABC001 /* tokenizer.json */,
@@ -180,6 +183,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				5A1000102F30000100ABC001 /* model.onnx in Resources */,
+				5A1000142F30000100ABC001 /* model_quantized.onnx in Resources */,
 				5A1000112F30000100ABC001 /* model_q4.onnx in Resources */,
 				3A3771D52FA00BD6004BF3B5 /* config.json in Resources */,
 				5A1000122F30000100ABC001 /* voices.bin in Resources */,

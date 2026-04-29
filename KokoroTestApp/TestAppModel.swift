@@ -45,7 +45,7 @@ final class TestAppModel: ObservableObject {
     @Published var voiceOptions: [VoiceOption] = []
     @Published var selectedVoiceID: String = ""
     @Published var speed: Double = 1.0
-    @Published var modelVariant: KokoroONNXSynthesiser.ModelVariant = .q4
+    @Published var modelVariant: KokoroONNXSynthesiser.ModelVariant = .quantized
     @Published var lowMemoryModeEnabled: Bool = false
     @Published var coreMLWarningMessage: String?
 
@@ -85,6 +85,8 @@ final class TestAppModel: ObservableObject {
     private let backgroundLookAheadSentenceCount = 0
     private let defaultCacheSentenceLimit = 6
     private let lowMemoryCacheSentenceLimit = 2
+    private let lookAheadSentenceCount = 3
+    private let retainedSentenceWindow = 1
 
     private var loadedText: String = ""
     private let defaults = UserDefaults.standard
@@ -213,6 +215,7 @@ final class TestAppModel: ObservableObject {
 
     func selectVoice(_ voiceID: String) {
         guard selectedVoiceID != voiceID else { return }
+        invalidateSynthesisTokens()
         selectedVoiceID = voiceID
         defaults.set(voiceID, forKey: selectedVoiceDefaultsKey)
         bufferedSentenceAudio = [:]
@@ -238,6 +241,7 @@ final class TestAppModel: ObservableObject {
         modelVariant = variant
         defaults.set(variant.rawValue, forKey: modelVariantDefaultsKey)
         log("Switching model variant to \(variant.displayName)")
+        invalidateSynthesisTokens()
 
         synthesiserSetupQueue.async { [weak self] in
             guard let self else { return }
@@ -316,8 +320,17 @@ final class TestAppModel: ObservableObject {
         speed = min(2.0, max(0.5, savedSpeed))
 
         let savedVariant = defaults.string(forKey: modelVariantDefaultsKey)
-        modelVariant = KokoroONNXSynthesiser.ModelVariant(rawValue: savedVariant ?? "") ?? .q4
+
         lowMemoryModeEnabled = defaults.bool(forKey: lowMemoryModeDefaultsKey)
+        if let savedVariant, let parsed = KokoroONNXSynthesiser.ModelVariant(rawValue: savedVariant) {
+            modelVariant = parsed
+        } else {
+            if let savedVariant {
+                log("Unknown persisted model variant '\(savedVariant)'; falling back to Quantized (8-bit)", level: .warning)
+            }
+            modelVariant = .quantized
+            defaults.set(modelVariant.rawValue, forKey: modelVariantDefaultsKey)
+        }
     }
 
     private func createSynthesiser() {
@@ -348,6 +361,7 @@ final class TestAppModel: ObservableObject {
     private func logBundledResourceStatus() {
         let fileNames = [
             "onnx/model.onnx",
+            "onnx/model_quantized.onnx",
             "onnx/model_q4.onnx",
             "voices/af_heart.bin",
             "tokenizer.json",
@@ -485,11 +499,11 @@ final class TestAppModel: ObservableObject {
     }
 
     private func loadText(_ text: String) {
+        invalidateSynthesisTokens()
+        synthesiser?.clearCache()
         loadedText = text
         sentences = tokenizeSentences(from: text)
         currentSentenceIndex = nil
-        bufferedSentenceAudio = [:]
-        bufferedVoiceID = nil
         generationProgress = 0
 
         if sentences.isEmpty {
@@ -583,7 +597,15 @@ final class TestAppModel: ObservableObject {
     }
 
     private func handleSentenceCompletion(finishedIndex: Int) {
-        guard currentSentenceIndex == finishedIndex else { return }
+        guard currentSentenceIndex == finishedIndex else {
+            log("Ignoring completion for sentence \(finishedIndex + 1): current index changed to \(String(describing: currentSentenceIndex))", level: .warning)
+            return
+        }
+
+        guard playbackPhase == .playing else {
+            log("Ignoring completion for sentence \(finishedIndex + 1): playback phase is \(playbackPhase)", level: .warning)
+            return
+        }
 
         let nextIndex = finishedIndex + 1
         guard nextIndex < sentences.count else {
@@ -592,6 +614,7 @@ final class TestAppModel: ObservableObject {
         }
 
         currentSentenceIndex = nextIndex
+        pruneBufferedAudio(around: nextIndex)
         if let cachedBuffer = bufferedSentenceAudio[nextIndex] {
             scheduleBufferAndPlay(cachedBuffer, at: nextIndex)
         } else {
@@ -709,6 +732,8 @@ final class TestAppModel: ObservableObject {
         isAppActive = false
         shouldConserveMemory = true
         trimBuffersToCurrentWindow(reason: "app entered background", forceAggressive: true)
+        invalidateSynthesisTokens()
+        synthesiser?.clearCache()
         log("App moved to inactive/background state")
     }
 
@@ -751,6 +776,7 @@ final class TestAppModel: ObservableObject {
         pendingResumeIndex = nil
         currentSentenceIndex = index
         bufferedVoiceID = selectedVoiceID
+        pruneBufferedAudio(around: index)
         playerNode.stop()
 
         if let cachedBuffer = bufferedSentenceAudio[index] {
@@ -786,30 +812,66 @@ final class TestAppModel: ObservableObject {
             guard let self else { return }
             let result = self.generateBuffer(for: sentence, voiceID: voiceID)
             DispatchQueue.main.async {
-                guard self.playbackToken == token else { return }
                 self.generatingIndices.remove(index)
-                guard self.selectedVoiceID == voiceID else { return }
+
+                guard self.playbackToken == token else {
+                    self.log("Dropping synthesis completion for sentence \(index + 1): token mismatch", level: .warning)
+                    return
+                }
+
+                guard self.sentences.indices.contains(index) else {
+                    self.log("Dropping synthesis completion for sentence \(index + 1): sentence index no longer valid", level: .warning)
+                    return
+                }
+
+                guard self.selectedVoiceID == voiceID else {
+                    self.log("Dropping synthesis completion for sentence \(index + 1): voice changed", level: .warning)
+                    return
+                }
 
                 switch result {
                 case .success(let buffer):
                     self.bufferedSentenceAudio[index] = buffer
                     self.enforceCachePolicy()
                     self.bufferedVoiceID = voiceID
+                    self.pruneBufferedAudio(around: self.currentSentenceIndex ?? index)
                     self.log("Synthesis done sentence \(index + 1): frames=\(buffer.frameLength)")
                     let progress = Double(self.bufferedSentenceAudio.count) / Double(max(self.sentences.count, 1))
                     self.generationProgress = min(1, max(0, progress.isFinite ? progress : 0))
-                    if autoplayWhenReady,
-                       self.currentSentenceIndex == index,
-                       self.playbackPhase != .paused
-                    {
-                        self.scheduleBufferAndPlay(buffer, at: index)
+
+                    guard autoplayWhenReady else { return }
+                    guard self.playbackToken == token else { return }
+                    guard self.sentences.indices.contains(index) else { return }
+                    guard self.selectedVoiceID == voiceID else { return }
+                    guard self.currentSentenceIndex == index else { return }
+                    guard self.playbackPhase == .generating || self.playbackPhase == .playing else {
+                        self.log("Skipping autoplay for sentence \(index + 1): playback phase is \(self.playbackPhase)", level: .warning)
+                        return
                     }
+
+                    self.scheduleBufferAndPlay(buffer, at: index)
                 case .failure(let error):
+                    guard self.playbackToken == token else { return }
+                    guard self.selectedVoiceID == voiceID else { return }
+                    guard self.sentences.indices.contains(index) else { return }
+                    guard self.currentSentenceIndex == index || self.playbackPhase == .generating else {
+                        self.log("Ignoring synthesis failure for sentence \(index + 1): playback moved on", level: .warning)
+                        return
+                    }
                     self.playbackPhase = .idle
                     self.log("Synthesis failed sentence \(index + 1): \(error.localizedDescription)", level: .error)
                 }
             }
         }
+    }
+
+    private func pruneBufferedAudio(around centerIndex: Int) {
+        let lowerBound = max(0, centerIndex - retainedSentenceWindow)
+        let upperBound = min(sentences.count - 1, centerIndex + lookAheadSentenceCount)
+        bufferedSentenceAudio = bufferedSentenceAudio.filter { index, _ in
+            (lowerBound...upperBound).contains(index)
+        }
+        generatingIndices = generatingIndices.filter { (lowerBound...upperBound).contains($0) }
     }
 
     private func log(_ message: String, level: DebugLogEntry.Level = .info) {

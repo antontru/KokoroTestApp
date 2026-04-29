@@ -6,6 +6,7 @@ import libespeak_ng
 final class KokoroONNXSynthesiser {
     enum ModelVariant: String, CaseIterable, Identifiable {
         case full
+        case quantized
         case q4
 
         var id: String { rawValue }
@@ -14,6 +15,8 @@ final class KokoroONNXSynthesiser {
             switch self {
             case .full:
                 return "Standard"
+            case .quantized:
+                return "Quantized (8-bit)"
             case .q4:
                 return "Quantised Q4"
             }
@@ -23,6 +26,8 @@ final class KokoroONNXSynthesiser {
             switch self {
             case .full:
                 return "model.onnx"
+            case .quantized:
+                return "model_quantized.onnx"
             case .q4:
                 return "model_q4.onnx"
             }
@@ -41,7 +46,9 @@ final class KokoroONNXSynthesiser {
     private let cacheLock = NSLock()
     private var bufferCache: [String: AVAudioPCMBuffer] = [:]
     private var cacheOrder: [String] = []
-    private let maxCachedSentences = 128
+    private var cachedAudioBytes = 0
+    private let maxCachedSentences = 32
+    private let maxCachedAudioBytes = 64 * 1024 * 1024
 
     private let voiceIDs: Set<String>
     private let voiceDataLock = NSLock()
@@ -150,7 +157,12 @@ final class KokoroONNXSynthesiser {
         cacheLock.lock()
         bufferCache.removeAll()
         cacheOrder.removeAll()
+        cachedAudioBytes = 0
         cacheLock.unlock()
+    }
+
+    private func estimatedByteCount(for buffer: AVAudioPCMBuffer) -> Int {
+        Int(buffer.frameLength) * Int(buffer.format.channelCount) * MemoryLayout<Float>.size
     }
 
     private func tokenize(_ text: String, voiceID: String) -> [Int64] {
@@ -177,6 +189,8 @@ final class KokoroONNXSynthesiser {
         var text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return text }
 
+        text = normalizeNumericForms(in: text)
+
         let ns = text as NSString
         if let regex = try? NSRegularExpression(pattern: "\\b[A-Z]{2,6}\\b") {
             let matches = regex.matches(in: text, range: NSRange(location: 0, length: ns.length)).reversed()
@@ -191,9 +205,137 @@ final class KokoroONNXSynthesiser {
             .replacingOccurrences(of: "“", with: "\"")
             .replacingOccurrences(of: "”", with: "\"")
             .replacingOccurrences(of: "’", with: "'")
-            .replacingOccurrences(of: "—", with: " — ")
             .replacingOccurrences(of: "…", with: " ... ")
-        return text
+
+        // Preserve single hyphens inside words (for compound words like report-creation),
+        // while normalizing dash-like clause separators into a canonical em dash boundary.
+        if let internalHyphenRegex = try? NSRegularExpression(pattern: "(?<=\\p{L})-(?=\\p{L})") {
+            text = internalHyphenRegex.stringByReplacingMatches(in: text, range: NSRange(text.startIndex..., in: text), withTemplate: "{{HYPHEN}}")
+        }
+
+        if let dashSeparatorRegex = try? NSRegularExpression(pattern: "\\s*(?:--+|[—–−])\\s*") {
+            text = dashSeparatorRegex.stringByReplacingMatches(in: text, range: NSRange(text.startIndex..., in: text), withTemplate: " — ")
+        }
+
+        text = text.replacingOccurrences(of: "{{HYPHEN}}", with: "-")
+
+        if let spaceRegex = try? NSRegularExpression(pattern: "\\s+") {
+            text = spaceRegex.stringByReplacingMatches(in: text, range: NSRange(text.startIndex..., in: text), withTemplate: " ")
+        }
+
+        return text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func normalizeNumericForms(in text: String) -> String {
+        var result = text
+
+        if let slashRegex = try? NSRegularExpression(pattern: "(?<=\\b[A-Z]{2,8}/)[0-9]+(?:\\.[0-9]+)?%?(?=\\b)") {
+            result = replaceMatches(in: result, regex: slashRegex) { fragment in
+                normalizeNumericFragment(fragment)
+            }
+        }
+
+        if let percentRegex = try? NSRegularExpression(pattern: "\\b[0-9]+(?:\\.[0-9]+)?%\\b") {
+            result = replaceMatches(in: result, regex: percentRegex) { fragment in
+                normalizePercentage(fragment)
+            }
+        }
+
+        if let decimalRegex = try? NSRegularExpression(pattern: "\\b[0-9]+\\.[0-9]+\\b") {
+            result = replaceMatches(in: result, regex: decimalRegex) { fragment in
+                normalizeDecimal(fragment)
+            }
+        }
+
+        if let integerRegex = try? NSRegularExpression(pattern: "\\b[0-9]+\\b") {
+            result = replaceMatches(in: result, regex: integerRegex) { fragment in
+                normalizeInteger(fragment)
+            }
+        }
+
+        return result
+    }
+
+    private func replaceMatches(in source: String, regex: NSRegularExpression, transform: (String) -> String) -> String {
+        let ns = source as NSString
+        let matches = regex.matches(in: source, range: NSRange(location: 0, length: ns.length)).reversed()
+        var output = source
+        for match in matches {
+            let original = ns.substring(with: match.range)
+            let replacement = transform(original)
+            output = (output as NSString).replacingCharacters(in: match.range, with: replacement)
+        }
+        return output
+    }
+
+    private func normalizeNumericFragment(_ fragment: String) -> String {
+        if fragment.hasSuffix("%") {
+            return normalizePercentage(fragment)
+        }
+        if fragment.contains(".") {
+            return normalizeDecimal(fragment)
+        }
+        return normalizeInteger(fragment)
+    }
+
+    private func normalizePercentage(_ token: String) -> String {
+        let valuePart = String(token.dropLast())
+        let normalizedValue = normalizeNumericFragment(valuePart)
+        return "\(normalizedValue) percent"
+    }
+
+    private func normalizeDecimal(_ token: String) -> String {
+        let parts = token.split(separator: ".", omittingEmptySubsequences: false)
+        guard parts.count == 2 else { return token }
+        let left = normalizeInteger(String(parts[0]))
+        let rightDigits = parts[1].map { normalizeDigit($0) }.joined(separator: " ")
+        guard !rightDigits.isEmpty else { return left }
+        return "\(left) point \(rightDigits)"
+    }
+
+    private func normalizeInteger(_ token: String) -> String {
+        guard let value = Int(token) else { return token }
+        if token.count == 4, (1900...2099).contains(value) {
+            return normalizeYear(value)
+        }
+        return spellOutNumber(value)
+    }
+
+    private func normalizeYear(_ year: Int) -> String {
+        if (2000...2009).contains(year) {
+            let suffix = year - 2000
+            return suffix == 0 ? "two thousand" : "two thousand \(spellOutNumber(suffix))"
+        }
+        if (2010...2099).contains(year) {
+            return "two thousand \(spellOutNumber(year - 2000))"
+        }
+        if (1900...1999).contains(year) {
+            return "nineteen \(spellOutNumber(year - 1900))"
+        }
+        return spellOutNumber(year)
+    }
+
+    private func spellOutNumber(_ value: Int) -> String {
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .spellOut
+        formatter.locale = Locale(identifier: "en_US")
+        return formatter.string(from: NSNumber(value: value))?.replacingOccurrences(of: "-", with: " ") ?? String(value)
+    }
+
+    private func normalizeDigit(_ char: Character) -> String {
+        switch char {
+        case "0": return "zero"
+        case "1": return "one"
+        case "2": return "two"
+        case "3": return "three"
+        case "4": return "four"
+        case "5": return "five"
+        case "6": return "six"
+        case "7": return "seven"
+        case "8": return "eight"
+        case "9": return "nine"
+        default: return String(char)
+        }
     }
 
     private func postProcessPhonemes(_ phonemes: String, language: String) -> String {
@@ -208,7 +350,7 @@ final class KokoroONNXSynthesiser {
         if let r1 = try? NSRegularExpression(pattern: "(?<=[a-zɹː])(?=hˈʌndɹɪd)") {
             ps = r1.stringByReplacingMatches(in: ps, range: NSRange(ps.startIndex..., in: ps), withTemplate: " ")
         }
-        if let r2 = try? NSRegularExpression(pattern: " z(?=[;:,.!?¡¿—…\"«»“” ]|$)") {
+        if let r2 = try? NSRegularExpression(pattern: " z(?=[;:,.!?¡¿—–−-…\"«»“” ]|$)") {
             ps = r2.stringByReplacingMatches(in: ps, range: NSRange(ps.startIndex..., in: ps), withTemplate: "z")
         }
         if language == "en-us", let r3 = try? NSRegularExpression(pattern: "(?<=nˈaɪn)ti(?!ː)") {
@@ -418,14 +560,20 @@ final class KokoroONNXSynthesiser {
         cacheLock.lock()
         defer { cacheLock.unlock() }
 
-        if bufferCache[key] == nil {
+        let newBytes = estimatedByteCount(for: buffer)
+        if let existing = bufferCache[key] {
+            cachedAudioBytes -= estimatedByteCount(for: existing)
+        } else {
             cacheOrder.append(key)
         }
         bufferCache[key] = buffer
+        cachedAudioBytes += newBytes
 
-        while cacheOrder.count > maxCachedSentences {
+        while cacheOrder.count > maxCachedSentences || cachedAudioBytes > maxCachedAudioBytes {
             let oldest = cacheOrder.removeFirst()
-            bufferCache.removeValue(forKey: oldest)
+            if let removed = bufferCache.removeValue(forKey: oldest) {
+                cachedAudioBytes -= estimatedByteCount(for: removed)
+            }
         }
     }
 
