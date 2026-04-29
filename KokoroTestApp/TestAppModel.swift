@@ -206,6 +206,7 @@ final class TestAppModel: ObservableObject {
 
     func selectVoice(_ voiceID: String) {
         guard selectedVoiceID != voiceID else { return }
+        invalidateSynthesisTokens()
         selectedVoiceID = voiceID
         defaults.set(voiceID, forKey: selectedVoiceDefaultsKey)
         bufferedSentenceAudio = [:]
@@ -231,6 +232,7 @@ final class TestAppModel: ObservableObject {
         modelVariant = variant
         defaults.set(variant.rawValue, forKey: modelVariantDefaultsKey)
         log("Switching model variant to \(variant.displayName)")
+        invalidateSynthesisTokens()
 
         synthesiserSetupQueue.async { [weak self] in
             guard let self else { return }
@@ -578,7 +580,15 @@ final class TestAppModel: ObservableObject {
     }
 
     private func handleSentenceCompletion(finishedIndex: Int) {
-        guard currentSentenceIndex == finishedIndex else { return }
+        guard currentSentenceIndex == finishedIndex else {
+            log("Ignoring completion for sentence \(finishedIndex + 1): current index changed to \(String(describing: currentSentenceIndex))", level: .warning)
+            return
+        }
+
+        guard playbackPhase == .playing else {
+            log("Ignoring completion for sentence \(finishedIndex + 1): playback phase is \(playbackPhase)", level: .warning)
+            return
+        }
 
         let nextIndex = finishedIndex + 1
         guard nextIndex < sentences.count else {
@@ -774,9 +784,22 @@ final class TestAppModel: ObservableObject {
             guard let self else { return }
             let result = self.generateBuffer(for: sentence, voiceID: voiceID)
             DispatchQueue.main.async {
-                guard self.playbackToken == token else { return }
                 self.generatingIndices.remove(index)
-                guard self.selectedVoiceID == voiceID else { return }
+
+                guard self.playbackToken == token else {
+                    self.log("Dropping synthesis completion for sentence \(index + 1): token mismatch", level: .warning)
+                    return
+                }
+
+                guard self.sentences.indices.contains(index) else {
+                    self.log("Dropping synthesis completion for sentence \(index + 1): sentence index no longer valid", level: .warning)
+                    return
+                }
+
+                guard self.selectedVoiceID == voiceID else {
+                    self.log("Dropping synthesis completion for sentence \(index + 1): voice changed", level: .warning)
+                    return
+                }
 
                 switch result {
                 case .success(let buffer):
@@ -786,13 +809,26 @@ final class TestAppModel: ObservableObject {
                     self.log("Synthesis done sentence \(index + 1): frames=\(buffer.frameLength)")
                     let progress = Double(self.bufferedSentenceAudio.count) / Double(max(self.sentences.count, 1))
                     self.generationProgress = min(1, max(0, progress.isFinite ? progress : 0))
-                    if autoplayWhenReady,
-                       self.currentSentenceIndex == index,
-                       self.playbackPhase != .paused
-                    {
-                        self.scheduleBufferAndPlay(buffer, at: index)
+
+                    guard autoplayWhenReady else { return }
+                    guard self.playbackToken == token else { return }
+                    guard self.sentences.indices.contains(index) else { return }
+                    guard self.selectedVoiceID == voiceID else { return }
+                    guard self.currentSentenceIndex == index else { return }
+                    guard self.playbackPhase == .generating || self.playbackPhase == .playing else {
+                        self.log("Skipping autoplay for sentence \(index + 1): playback phase is \(self.playbackPhase)", level: .warning)
+                        return
                     }
+
+                    self.scheduleBufferAndPlay(buffer, at: index)
                 case .failure(let error):
+                    guard self.playbackToken == token else { return }
+                    guard self.selectedVoiceID == voiceID else { return }
+                    guard self.sentences.indices.contains(index) else { return }
+                    guard self.currentSentenceIndex == index || self.playbackPhase == .generating else {
+                        self.log("Ignoring synthesis failure for sentence \(index + 1): playback moved on", level: .warning)
+                        return
+                    }
                     self.playbackPhase = .idle
                     self.log("Synthesis failed sentence \(index + 1): \(error.localizedDescription)", level: .error)
                 }
