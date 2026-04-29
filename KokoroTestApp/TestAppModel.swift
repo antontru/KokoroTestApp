@@ -79,6 +79,7 @@ final class TestAppModel: ObservableObject {
     private var bufferedVoiceID: String?
     private var generatingIndices: Set<Int> = []
     private let lookAheadSentenceCount = 3
+    private let retainedSentenceWindow = 1
 
     private var loadedText: String = ""
     private let defaults = UserDefaults.standard
@@ -479,11 +480,11 @@ final class TestAppModel: ObservableObject {
     }
 
     private func loadText(_ text: String) {
+        invalidateSynthesisTokens()
+        synthesiser?.clearCache()
         loadedText = text
         sentences = tokenizeSentences(from: text)
         currentSentenceIndex = nil
-        bufferedSentenceAudio = [:]
-        bufferedVoiceID = nil
         generationProgress = 0
 
         if sentences.isEmpty {
@@ -586,6 +587,7 @@ final class TestAppModel: ObservableObject {
         }
 
         currentSentenceIndex = nextIndex
+        pruneBufferedAudio(around: nextIndex)
         if let cachedBuffer = bufferedSentenceAudio[nextIndex] {
             scheduleBufferAndPlay(cachedBuffer, at: nextIndex)
         } else {
@@ -701,6 +703,8 @@ final class TestAppModel: ObservableObject {
     @objc
     private func handleWillResignActive() {
         isAppActive = false
+        invalidateSynthesisTokens()
+        synthesiser?.clearCache()
         log("App moved to inactive/background state")
     }
 
@@ -736,6 +740,7 @@ final class TestAppModel: ObservableObject {
         pendingResumeIndex = nil
         currentSentenceIndex = index
         bufferedVoiceID = selectedVoiceID
+        pruneBufferedAudio(around: index)
         playerNode.stop()
 
         if let cachedBuffer = bufferedSentenceAudio[index] {
@@ -777,6 +782,7 @@ final class TestAppModel: ObservableObject {
                 case .success(let buffer):
                     self.bufferedSentenceAudio[index] = buffer
                     self.bufferedVoiceID = voiceID
+                    self.pruneBufferedAudio(around: self.currentSentenceIndex ?? index)
                     self.log("Synthesis done sentence \(index + 1): frames=\(buffer.frameLength)")
                     let progress = Double(self.bufferedSentenceAudio.count) / Double(max(self.sentences.count, 1))
                     self.generationProgress = min(1, max(0, progress.isFinite ? progress : 0))
@@ -792,6 +798,15 @@ final class TestAppModel: ObservableObject {
                 }
             }
         }
+    }
+
+    private func pruneBufferedAudio(around centerIndex: Int) {
+        let lowerBound = max(0, centerIndex - retainedSentenceWindow)
+        let upperBound = min(sentences.count - 1, centerIndex + lookAheadSentenceCount)
+        bufferedSentenceAudio = bufferedSentenceAudio.filter { index, _ in
+            (lowerBound...upperBound).contains(index)
+        }
+        generatingIndices = generatingIndices.filter { (lowerBound...upperBound).contains($0) }
     }
 
     private func log(_ message: String, level: DebugLogEntry.Level = .info) {
