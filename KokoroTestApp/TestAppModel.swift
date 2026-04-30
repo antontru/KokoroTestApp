@@ -851,6 +851,7 @@ final class TestAppModel: ObservableObject {
         shouldConserveMemory = true
         synthesiser?.clearCache()
         trimBuffersToCurrentWindow(reason: "iOS memory warning", forceAggressive: true)
+        recoverPlaybackAfterAggressiveTrimIfNeeded()
     }
     #endif
 
@@ -1063,7 +1064,7 @@ final class TestAppModel: ObservableObject {
         if forceAggressive {
             bufferedSentenceAudio.removeAll()
             generatingIndices.removeAll()
-        autoplayPendingIndices.removeAll()
+            autoplayPendingIndices.removeAll()
             generationProgress = 0
             log("Aggressively cleared synthesis + sentence buffers (\(reason))", level: .warning)
             return
@@ -1073,6 +1074,22 @@ final class TestAppModel: ObservableObject {
         bufferedSentenceAudio = bufferedSentenceAudio.filter { keepIndices.contains($0.key) }
         enforceCachePolicy()
         log("Trimmed sentence cache (\(reason)); policy: \(memoryPolicyDescription)")
+    }
+
+    private func recoverPlaybackAfterAggressiveTrimIfNeeded() {
+        guard playbackPhase == .generating || playbackPhase == .playing else { return }
+        guard let currentSentenceIndex, sentences.indices.contains(currentSentenceIndex) else { return }
+
+        let token = playbackToken
+        if bufferedSentenceAudio[currentSentenceIndex] != nil {
+            tryAutoplayPendingSentence(token: token, voiceID: selectedVoiceID)
+            return
+        }
+
+        if !generatingIndices.contains(currentSentenceIndex) {
+            log("Recovering current sentence \(currentSentenceIndex + 1) after aggressive cache trim")
+            requestBufferIfNeeded(at: currentSentenceIndex, token: token, autoplayWhenReady: true)
+        }
     }
 
     private func logStartupConfiguration() {
