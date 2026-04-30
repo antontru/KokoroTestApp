@@ -46,7 +46,6 @@ final class TestAppModel: ObservableObject {
     @Published var selectedVoiceID: String = ""
     @Published var speed: Double = 1.0
     @Published var modelVariant: KokoroONNXSynthesiser.ModelVariant = .quantized
-    @Published var lowMemoryModeEnabled: Bool = false
     @Published var coreMLWarningMessage: String?
 
     @Published var sentences: [String] = []
@@ -82,12 +81,11 @@ final class TestAppModel: ObservableObject {
     private var generatingIndices: Set<Int> = []
     private var autoplayPendingIndices: Set<Int> = []
     private let defaultLookAheadSentenceCount = 3
-    private let lowMemoryLookAheadSentenceCount = 1
     private let backgroundLookAheadSentenceCount = 0
-    private let defaultCacheSentenceLimit = 6
-    private let lowMemoryCacheSentenceLimit = 2
-    private let lookAheadSentenceCount = 3
+    private let defaultCacheSentenceLimit = 8
+    private let lookAheadSentenceCount = 4
     private let retainedSentenceWindow = 1
+    private let minimumBufferedSentencesBeforeAutoplay = 3
     private let maxSentenceCharacterCount = 180
     private let maxSentenceWordCount = 36
 
@@ -97,7 +95,6 @@ final class TestAppModel: ObservableObject {
     private let selectedVoiceDefaultsKey = "kokoro.selectedVoiceID"
     private let speedDefaultsKey = "kokoro.speed"
     private let modelVariantDefaultsKey = "kokoro_model_variant"
-    private let lowMemoryModeDefaultsKey = "kokoro_low_memory_mode"
 
     init() {
         configureVoices()
@@ -324,7 +321,6 @@ final class TestAppModel: ObservableObject {
 
         let savedVariant = defaults.string(forKey: modelVariantDefaultsKey)
 
-        lowMemoryModeEnabled = defaults.bool(forKey: lowMemoryModeDefaultsKey)
         if let savedVariant, let parsed = KokoroONNXSynthesiser.ModelVariant(rawValue: savedVariant) {
             modelVariant = parsed
         } else {
@@ -534,7 +530,7 @@ final class TestAppModel: ObservableObject {
     private func splitOversizedSentence(_ sentence: String) -> [String] {
         guard needsSentenceSplit(sentence) else { return [sentence] }
 
-        let separators = [", ", "; ", ": ", " — ", " - "]
+        let separators = [". ", "! ", "? ", "; ", ": ", " — ", " - "]
         var pieces = [sentence]
 
         for separator in separators {
@@ -548,7 +544,8 @@ final class TestAppModel: ObservableObject {
                     refined.append(piece)
                     continue
                 }
-                let splitParts = piece.split(separator: Character(separator.trimmingCharacters(in: .whitespaces))).map {
+                let splitCharacter = Character(separator.trimmingCharacters(in: .whitespaces))
+                let splitParts = piece.split(separator: splitCharacter, omittingEmptySubsequences: true).map {
                     $0.trimmingCharacters(in: .whitespacesAndNewlines)
                 }
                 if splitParts.count <= 1 {
@@ -928,6 +925,10 @@ final class TestAppModel: ObservableObject {
                         self.log("Skipping autoplay for sentence \(index + 1): playback phase is \(self.playbackPhase)", level: .warning)
                         return
                     }
+                    guard self.hasSufficientInitialBuffer(startingAt: index) else {
+                        self.log("Waiting for initial cache warmup before autoplay at sentence \(index + 1)")
+                        return
+                    }
 
                     self.scheduleBufferAndPlay(buffer, at: index)
                 case .failure(let error):
@@ -969,14 +970,7 @@ final class TestAppModel: ObservableObject {
     }
 
     var memoryPolicyDescription: String {
-        "lookAhead=\(currentLookAheadSentenceCount), cacheLimit=\(currentCacheSentenceLimit), lowMemoryMode=\(lowMemoryModeEnabled ? "on" : "off"), conserveMemory=\(shouldConserveMemory ? "yes" : "no"), appActive=\(isAppActive ? "yes" : "no")"
-    }
-
-    func setLowMemoryModeEnabled(_ enabled: Bool) {
-        guard lowMemoryModeEnabled != enabled else { return }
-        lowMemoryModeEnabled = enabled
-        defaults.set(enabled, forKey: lowMemoryModeDefaultsKey)
-        trimBuffersToCurrentWindow(reason: "low memory mode \(enabled ? "enabled" : "disabled")", forceAggressive: enabled)
+        "lookAhead=\(currentLookAheadSentenceCount), cacheLimit=\(currentCacheSentenceLimit), initialWarmup=\(minimumBufferedSentencesBeforeAutoplay), conserveMemory=\(shouldConserveMemory ? "yes" : "no"), appActive=\(isAppActive ? "yes" : "no")"
     }
 
     private var currentLookAheadSentenceCount: Int {
@@ -986,11 +980,22 @@ final class TestAppModel: ObservableObject {
         if shouldConserveMemory {
             return 1
         }
-        return lowMemoryModeEnabled ? lowMemoryLookAheadSentenceCount : defaultLookAheadSentenceCount
+        return defaultLookAheadSentenceCount
     }
 
     private var currentCacheSentenceLimit: Int {
-        lowMemoryModeEnabled ? lowMemoryCacheSentenceLimit : defaultCacheSentenceLimit
+        defaultCacheSentenceLimit
+    }
+
+    private func hasSufficientInitialBuffer(startingAt index: Int) -> Bool {
+        let warmupTarget = min(sentences.count, index + minimumBufferedSentencesBeforeAutoplay)
+        guard warmupTarget > index else { return true }
+        for sentenceIndex in index..<warmupTarget {
+            if bufferedSentenceAudio[sentenceIndex] == nil {
+                return false
+            }
+        }
+        return true
     }
 
     private func enforceCachePolicy() {
