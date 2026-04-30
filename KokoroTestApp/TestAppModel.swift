@@ -80,6 +80,7 @@ final class TestAppModel: ObservableObject {
     private var bufferedSentenceAudio: [Int: AVAudioPCMBuffer] = [:]
     private var bufferedVoiceID: String?
     private var generatingIndices: Set<Int> = []
+    private var autoplayPendingIndices: Set<Int> = []
     private let defaultLookAheadSentenceCount = 3
     private let lowMemoryLookAheadSentenceCount = 1
     private let backgroundLookAheadSentenceCount = 0
@@ -664,6 +665,7 @@ final class TestAppModel: ObservableObject {
         bufferedSentenceAudio = [:]
         bufferedVoiceID = nil
         generatingIndices.removeAll()
+        autoplayPendingIndices.removeAll()
         pendingResumeIndex = nil
         generationProgress = 0
     }
@@ -803,7 +805,13 @@ final class TestAppModel: ObservableObject {
     private func requestBufferIfNeeded(at index: Int, token: UUID, autoplayWhenReady: Bool) {
         guard sentences.indices.contains(index) else { return }
         guard bufferedSentenceAudio[index] == nil else { return }
-        guard !generatingIndices.contains(index) else { return }
+        if generatingIndices.contains(index) {
+            if autoplayWhenReady {
+                autoplayPendingIndices.insert(index)
+                log("Marked sentence \(index + 1) for autoplay when synthesis completes")
+            }
+            return
+        }
         let sentence = sentences[index]
         let voiceID = selectedVoiceID
         generatingIndices.insert(index)
@@ -814,6 +822,7 @@ final class TestAppModel: ObservableObject {
             let result = self.generateBuffer(for: sentence, voiceID: voiceID)
             DispatchQueue.main.async {
                 self.generatingIndices.remove(index)
+                let shouldAutoplayAfterSynthesis = autoplayWhenReady || self.autoplayPendingIndices.remove(index) != nil
 
                 guard self.playbackToken == token else {
                     self.log("Dropping synthesis completion for sentence \(index + 1): token mismatch", level: .warning)
@@ -840,7 +849,7 @@ final class TestAppModel: ObservableObject {
                     let progress = Double(self.bufferedSentenceAudio.count) / Double(max(self.sentences.count, 1))
                     self.generationProgress = min(1, max(0, progress.isFinite ? progress : 0))
 
-                    guard autoplayWhenReady else { return }
+                    guard shouldAutoplayAfterSynthesis else { return }
                     guard self.playbackToken == token else { return }
                     guard self.sentences.indices.contains(index) else { return }
                     guard self.selectedVoiceID == voiceID else { return }
@@ -873,6 +882,7 @@ final class TestAppModel: ObservableObject {
             (lowerBound...upperBound).contains(index)
         }
         generatingIndices = generatingIndices.filter { (lowerBound...upperBound).contains($0) }
+        autoplayPendingIndices = autoplayPendingIndices.filter { (lowerBound...upperBound).contains($0) }
     }
 
     private func log(_ message: String, level: DebugLogEntry.Level = .info) {
@@ -941,6 +951,7 @@ final class TestAppModel: ObservableObject {
         if forceAggressive {
             bufferedSentenceAudio.removeAll()
             generatingIndices.removeAll()
+        autoplayPendingIndices.removeAll()
             generationProgress = 0
             log("Aggressively cleared synthesis + sentence buffers (\(reason))", level: .warning)
             return
