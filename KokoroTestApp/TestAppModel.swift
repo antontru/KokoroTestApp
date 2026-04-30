@@ -88,6 +88,8 @@ final class TestAppModel: ObservableObject {
     private let lowMemoryCacheSentenceLimit = 2
     private let lookAheadSentenceCount = 3
     private let retainedSentenceWindow = 1
+    private let maxSentenceCharacterCount = 180
+    private let maxSentenceWordCount = 36
 
     private var loadedText: String = ""
     private let defaults = UserDefaults.standard
@@ -162,7 +164,7 @@ final class TestAppModel: ObservableObject {
         guard !sentences.isEmpty else { return }
         let index = currentSentenceIndex ?? 0
         requestBufferIfNeeded(at: index, token: playbackToken, autoplayWhenReady: autoPlay)
-        prefetchLookAhead(from: index + 1, token: playbackToken)
+        prefetchLookAhead(from: index, token: playbackToken)
     }
 
     func stopPlayback() {
@@ -521,11 +523,79 @@ final class TestAppModel: ObservableObject {
         tokenizer.enumerateTokens(in: text.startIndex..<text.endIndex) { range, _ in
             let sentence = text[range].trimmingCharacters(in: .whitespacesAndNewlines)
             if !sentence.isEmpty {
-                result.append(sentence)
+                let split = splitOversizedSentence(sentence)
+                result.append(contentsOf: split)
             }
             return true
         }
         return result
+    }
+
+    private func splitOversizedSentence(_ sentence: String) -> [String] {
+        guard needsSentenceSplit(sentence) else { return [sentence] }
+
+        let separators = [", ", "; ", ": ", " — ", " - "]
+        var pieces = [sentence]
+
+        for separator in separators {
+            if pieces.allSatisfy({ !needsSentenceSplit($0) }) {
+                break
+            }
+
+            var refined: [String] = []
+            for piece in pieces {
+                guard needsSentenceSplit(piece) else {
+                    refined.append(piece)
+                    continue
+                }
+                let splitParts = piece.split(separator: Character(separator.trimmingCharacters(in: .whitespaces))).map {
+                    $0.trimmingCharacters(in: .whitespacesAndNewlines)
+                }
+                if splitParts.count <= 1 {
+                    refined.append(piece)
+                    continue
+                }
+                refined.append(contentsOf: splitParts.filter { !$0.isEmpty })
+            }
+            pieces = refined
+        }
+
+        if pieces.allSatisfy({ !needsSentenceSplit($0) }) {
+            return pieces
+        }
+
+        var chunked: [String] = []
+        for piece in pieces {
+            if !needsSentenceSplit(piece) {
+                chunked.append(piece)
+                continue
+            }
+
+            var currentWords: [Substring] = []
+            var currentLength = 0
+            for word in piece.split(whereSeparator: { $0.isWhitespace || $0.isNewline }) {
+                let proposedLength = currentLength + (currentWords.isEmpty ? 0 : 1) + word.count
+                if proposedLength > maxSentenceCharacterCount || currentWords.count >= maxSentenceWordCount {
+                    if !currentWords.isEmpty {
+                        chunked.append(currentWords.joined(separator: " "))
+                        currentWords.removeAll(keepingCapacity: true)
+                        currentLength = 0
+                    }
+                }
+                currentWords.append(word)
+                currentLength += (currentLength == 0 ? 0 : 1) + word.count
+            }
+            if !currentWords.isEmpty {
+                chunked.append(currentWords.joined(separator: " "))
+            }
+        }
+
+        return chunked.filter { !$0.isEmpty }
+    }
+
+    private func needsSentenceSplit(_ sentence: String) -> Bool {
+        let wordCount = sentence.split(whereSeparator: { $0.isWhitespace || $0.isNewline }).count
+        return sentence.count > maxSentenceCharacterCount || wordCount > maxSentenceWordCount
     }
 
     private func startPlayback(at index: Int) {
@@ -622,7 +692,7 @@ final class TestAppModel: ObservableObject {
             playbackPhase = .generating
             requestBufferIfNeeded(at: nextIndex, token: playbackToken, autoplayWhenReady: true)
         }
-        prefetchLookAhead(from: nextIndex + 1, token: playbackToken)
+        prefetchLookAhead(from: nextIndex, token: playbackToken)
     }
 
     private func generateBuffer(for sentence: String, voiceID: String) -> Result<AVAudioPCMBuffer, Error> {
@@ -789,7 +859,7 @@ final class TestAppModel: ObservableObject {
             requestBufferIfNeeded(at: index, token: token, autoplayWhenReady: true)
         }
 
-        prefetchLookAhead(from: index + 1, token: token)
+        prefetchLookAhead(from: index, token: token)
     }
 
     private func prefetchLookAhead(from startIndex: Int, token: UUID) {
