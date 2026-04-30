@@ -21,7 +21,16 @@ struct ContentView: View {
         #if targetEnvironment(simulator)
         Text("Not supported on Simulator")
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(Color.black)
+            .background(
+                LinearGradient(
+                    colors: [
+                        Color(red: 0.09, green: 0.09, blue: 0.1),
+                        Color.black,
+                    ],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+            )
             .foregroundStyle(.white)
         #else
         NavigationStack {
@@ -237,7 +246,7 @@ private struct EditView: View {
                     .focused($isEditorFocused)
                     .padding(12)
                     .scrollContentBackground(.hidden)
-                    .background(Color.black)
+                    .background(Color.clear)
 
                 if inputText.isEmpty {
                     Text("Paste your text here, or import a file…")
@@ -266,7 +275,7 @@ private struct EditView: View {
                 .background(Color.white.opacity(0.04))
             }
         }
-        .background(Color.black)
+        .background(Color.clear)
     }
 }
 
@@ -276,7 +285,7 @@ private struct ReadView: View {
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                LazyVStack(spacing: 10) {
+                LazyVStack(alignment: .leading, spacing: 4) {
                     ForEach(Array(viewModel.sentences.enumerated()), id: \.offset) { index, sentence in
                         Button {
                             viewModel.jumpToSentence(index)
@@ -284,15 +293,16 @@ private struct ReadView: View {
                             Text(sentence)
                                 .foregroundStyle(textColor(for: index))
                                 .frame(maxWidth: .infinity, alignment: .leading)
-                                .padding(14)
+                                .padding(.horizontal, 4)
+                                .padding(.vertical, 2)
                                 .background(backgroundColor(for: index))
-                                .cornerRadius(12)
+                                .cornerRadius(6)
                         }
                         .buttonStyle(.plain)
                         .id(index)
                     }
                 }
-                .padding(.horizontal, 14)
+                .padding(.horizontal, 18)
                 .padding(.top, 10)
                 .padding(.bottom, 20)
             }
@@ -306,14 +316,12 @@ private struct ReadView: View {
     }
 
     private func backgroundColor(for index: Int) -> Color {
-        guard let current = viewModel.currentSentenceIndex else {
-            return Color.white.opacity(0.06)
-        }
+        guard let current = viewModel.currentSentenceIndex else { return .clear }
 
         if index == current {
-            return Color.green.opacity(0.35)
+            return Color.green.opacity(0.28)
         }
-        return Color.white.opacity(0.06)
+        return .clear
     }
 
     private func textColor(for index: Int) -> Color {
@@ -325,11 +333,7 @@ private struct ReadView: View {
             return .white
         }
 
-        if index < current {
-            return Color.white.opacity(0.45)
-        }
-
-        return .white
+        return index < current ? Color.white.opacity(0.62) : .white
     }
 }
 
@@ -391,8 +395,8 @@ private struct PlayerBar: View {
         .background(
             LinearGradient(
                 colors: [
-                    Color(red: 0.05, green: 0.06, blue: 0.1),
-                    Color(red: 0.02, green: 0.03, blue: 0.08),
+                    Color(red: 0.11, green: 0.11, blue: 0.13),
+                    Color(red: 0.06, green: 0.06, blue: 0.08),
                 ],
                 startPoint: .top,
                 endPoint: .bottom
