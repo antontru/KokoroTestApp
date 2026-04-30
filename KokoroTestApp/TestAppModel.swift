@@ -935,6 +935,7 @@ final class TestAppModel: ObservableObject {
                     self.log("Synthesis done sentence \(index + 1): frames=\(buffer.frameLength)")
                     let progress = Double(self.bufferedSentenceAudio.count) / Double(max(self.sentences.count, 1))
                     self.generationProgress = min(1, max(0, progress.isFinite ? progress : 0))
+                    self.tryAutoplayPendingSentence(token: token, voiceID: voiceID)
 
                     guard shouldAutoplayAfterSynthesis else { return }
                     guard self.playbackToken == token else { return }
@@ -966,6 +967,20 @@ final class TestAppModel: ObservableObject {
                 }
             }
         }
+    }
+
+    private func tryAutoplayPendingSentence(token: UUID, voiceID: String) {
+        guard playbackToken == token else { return }
+        guard selectedVoiceID == voiceID else { return }
+        guard playbackPhase == .generating || playbackPhase == .playing else { return }
+        guard let index = currentSentenceIndex else { return }
+        guard autoplayPendingIndices.contains(index) else { return }
+        guard sentences.indices.contains(index) else { return }
+        guard let buffer = bufferedSentenceAudio[index] else { return }
+        guard hasSufficientInitialBuffer(startingAt: index) else { return }
+
+        autoplayPendingIndices.remove(index)
+        scheduleBufferAndPlay(buffer, at: index)
     }
 
     private func pruneBufferedAudio(around centerIndex: Int) {
