@@ -544,10 +544,7 @@ final class TestAppModel: ObservableObject {
                     refined.append(piece)
                     continue
                 }
-                let splitCharacter = Character(separator.trimmingCharacters(in: .whitespaces))
-                let splitParts = piece.split(separator: splitCharacter, omittingEmptySubsequences: true).map {
-                    $0.trimmingCharacters(in: .whitespacesAndNewlines)
-                }
+                let splitParts = split(piece, by: separator)
                 if splitParts.count <= 1 {
                     refined.append(piece)
                     continue
@@ -593,6 +590,29 @@ final class TestAppModel: ObservableObject {
     private func needsSentenceSplit(_ sentence: String) -> Bool {
         let wordCount = sentence.split(whereSeparator: { $0.isWhitespace || $0.isNewline }).count
         return sentence.count > maxSentenceCharacterCount || wordCount > maxSentenceWordCount
+    }
+
+    private func split(_ text: String, by separator: String) -> [String] {
+        guard !separator.isEmpty else { return [text] }
+
+        var parts: [String] = []
+        var searchStart = text.startIndex
+
+        while let range = text.range(of: separator, range: searchStart..<text.endIndex) {
+            let fragment = text[searchStart..<range.lowerBound]
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if !fragment.isEmpty {
+                parts.append(String(fragment))
+            }
+            searchStart = range.upperBound
+        }
+
+        let trailing = text[searchStart..<text.endIndex].trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trailing.isEmpty {
+            parts.append(String(trailing))
+        }
+
+        return parts
     }
 
     private func startPlayback(at index: Int) {
@@ -889,7 +909,7 @@ final class TestAppModel: ObservableObject {
             let result = self.generateBuffer(for: sentence, voiceID: voiceID)
             DispatchQueue.main.async {
                 self.generatingIndices.remove(index)
-                let shouldAutoplayAfterSynthesis = autoplayWhenReady || self.autoplayPendingIndices.remove(index) != nil
+                let shouldAutoplayAfterSynthesis = autoplayWhenReady || self.autoplayPendingIndices.contains(index)
 
                 guard self.playbackToken == token else {
                     self.log("Dropping synthesis completion for sentence \(index + 1): token mismatch", level: .warning)
@@ -926,10 +946,12 @@ final class TestAppModel: ObservableObject {
                         return
                     }
                     guard self.hasSufficientInitialBuffer(startingAt: index) else {
+                        self.autoplayPendingIndices.insert(index)
                         self.log("Waiting for initial cache warmup before autoplay at sentence \(index + 1)")
                         return
                     }
 
+                    self.autoplayPendingIndices.remove(index)
                     self.scheduleBufferAndPlay(buffer, at: index)
                 case .failure(let error):
                     guard self.playbackToken == token else { return }
