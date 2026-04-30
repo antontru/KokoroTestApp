@@ -565,11 +565,6 @@ private struct SettingsSheet: View {
                 }
 
                 Section("Memory") {
-                    Toggle("Low Memory Mode", isOn: Binding(
-                        get: { viewModel.lowMemoryModeEnabled },
-                        set: { viewModel.setLowMemoryModeEnabled($0) }
-                    ))
-
                     Text(viewModel.memoryPolicyDescription)
                         .font(.caption)
                         .foregroundStyle(.gray)
